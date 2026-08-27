@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="LoopCoder 本地编程智能体可视化工作台">
+    <title>LoopCoder — Local Coding Agent</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="LoopCoder 首页">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>
+          <b>LOOPCODER</b>
+          <small>LOCAL AGENT CONSOLE</small>
+        </span>
+      </a>
+
+      <div class="runtime-strip" aria-label="运行环境状态">
+        <div class="runtime-item">
+          <span class="pulse-dot" id="connection-dot"></span>
+          <span id="connection-label">正在连接本地服务</span>
+        </div>
+        <span class="strip-divider"></span>
+        <div class="runtime-item model-badge">
+          <span>MODEL</span>
+          <strong id="model-name">—</strong>
+        </div>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="composer-panel" aria-labelledby="composer-title">
+        <div class="eyebrow"><span>01</span> MISSION CONTROL</div>
+        <h1 id="composer-title">让模型真正<br><em>动手写代码。</em></h1>
+        <p class="lead">
+          输入一个编程任务。LoopCoder 会理解项目、调用本地工具、修改文件并运行验证。
+        </p>
+
+        <form id="run-form" novalidate>
+          <label class="field-label" for="workspace-input">
+            <span>工作区</span>
+            <small>Agent 只能访问这个文件夹</small>
+          </label>
+          <div class="path-field">
+            <span class="path-prefix" aria-hidden="true">~/</span>
+            <input
+              id="workspace-input"
+              name="workspace"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              aria-describedby="workspace-hint"
+            >
+          </div>
+          <p class="field-hint" id="workspace-hint">支持绝对路径，或相对于当前项目的路径。</p>
+
+          <label class="field-label prompt-label" for="prompt-input">
+            <span>Prompt</span>
+            <small><kbd>⌘</kbd> / <kbd>Ctrl</kbd> + <kbd>Enter</kbd> 运行</small>
+          </label>
+          <div class="prompt-wrap">
+            <textarea
+              id="prompt-input"
+              name="task"
+              rows="9"
+              maxlength="20000"
+              placeholder="例如：阅读当前项目，修复所有失败的测试；只修改必要代码，完成后运行测试并总结修改。"
+              required
+            ></textarea>
+            <div class="prompt-footer">
+              <span id="prompt-count">0 / 20,000</span>
+              <span class="privacy-note"><i aria-hidden="true"></i> API Key 仅保留在本地后端</span>
+            </div>
+          </div>
+
+          <div class="prompt-presets" aria-label="Prompt 示例">
+            <button type="button" class="preset" data-prompt="请阅读当前项目，修复所有失败的测试；只修改必要代码，完成后运行全部测试并总结修改。">修复失败测试</button>
+            <button type="button" class="preset" data-prompt="请分析当前项目结构，找出潜在的错误处理问题并修复；完成后运行相关测试。">检查错误处理</button>
+            <button type="button" class="preset" data-prompt="请只检查当前项目结构并说明主要模块，不要修改任何文件，也不要运行命令。">只读分析项目</button>
+          </div>
+
+          <details class="advanced-panel">
+            <summary>
+              <span>运行设置</span>
+              <span class="summary-line"></span>
+              <span class="summary-plus" aria-hidden="true">+</span>
+            </summary>
+            <div class="advanced-grid">
+              <label class="range-field" for="max-steps">
+                <span>最大模型步骤 <output id="max-steps-value">20</output></span>
+                <input id="max-steps" type="range" min="1" max="50" value="20">
+              </label>
+              <label class="switch-field" for="demo-toggle">
+                <span>
+                  <b>离线演示</b>
+                  <small>不调用 API，运行固定工具流程</small>
+                </span>
+                <input id="demo-toggle" type="checkbox">
+                <i aria-hidden="true"></i>
+              </label>
+            </div>
+          </details>
+
+          <div class="form-message" id="form-message" role="alert" aria-live="polite"></div>
+
+          <div class="run-actions">
+            <button class="run-button" id="run-button" type="submit">
+              <span class="button-label">启动 Agent</span>
+              <span class="button-arrow" aria-hidden="true">↗</span>
+            </button>
+            <button class="stop-button" id="stop-button" type="button" hidden>
+              <span aria-hidden="true"></span> 停止任务
+            </button>
+          </div>
+        </form>
+
+        <div class="safety-card">
+          <span class="safety-index">LOCAL<br>ONLY</span>
+          <p><strong>工作区隔离</strong><br>文件工具拒绝越界访问，命令通过白名单执行，API Key 不会发送到浏览器。</p>
+        </div>
+      </section>
+
+      <section class="activity-panel" aria-labelledby="activity-title">
+        <div class="activity-header">
+          <div>
+            <div class="eyebrow light"><span>02</span> EXECUTION TRACE</div>
+            <h2 id="activity-title">Agent 运行轨迹</h2>
+          </div>
+          <div class="status-pill idle" id="run-status">
+            <span></span><b>等待任务</b>
+          </div>
+        </div>
+
+        <div class="metrics" aria-label="任务运行统计">
+          <article>
+            <small>MODEL STEPS</small>
+            <strong id="metric-steps">00</strong>
+            <span>模型决策轮次</span>
+          </article>
+          <article>
+            <small>TOOL CALLS</small>
+            <strong id="metric-tools">00</strong>
+            <span>本地工具调用</span>
+          </article>
+          <article>
+            <small>ELAPSED</small>
+            <strong id="metric-time">00:00</strong>
+            <span>本次运行时长</span>
+          </article>
+        </div>
+
+        <div class="trace-viewport" id="trace-viewport">
+          <div class="empty-state" id="empty-state">
+            <div class="loop-diagram" aria-hidden="true">
+              <div class="diagram-node node-model"><span>MODEL</span></div>
+              <div class="diagram-track track-one"><i></i></div>
+              <div class="diagram-node node-tools"><span>TOOLS</span></div>
+              <div class="diagram-track track-two"><i></i></div>
+              <div class="diagram-node node-result"><span>RESULT</span></div>
+            </div>
+            <h3>执行轨迹将在这里展开</h3>
+            <p>每次模型决策、工具参数、本地结果和最终回答都会按时间顺序显示。</p>
+          </div>
+
+          <ol class="timeline" id="timeline" aria-live="polite"></ol>
+
+          <article class="result-card" id="result-card" hidden>
+            <header>
+              <span class="result-check" aria-hidden="true">✓</span>
+              <div><small>FINAL RESPONSE</small><h3>任务结果</h3></div>
+              <button type="button" id="copy-result">复制结果</button>
+            </header>
+            <pre id="result-output"></pre>
+          </article>
+        </div>
+
+        <footer class="activity-footer">
+          <span id="run-id">RUN / NOT STARTED</span>
+          <span>FRAMEWORK-FREE AGENT LOOP</span>
+        </footer>
+      </section>
+    </main>
+  </body>
+</html>

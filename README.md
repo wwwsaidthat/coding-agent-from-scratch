@@ -14,6 +14,8 @@
 - 路径越界防护、敏感文件拦截、命令白名单和超时；
 - API 重试、参数校验、异常结果回传、重复调用检测和最大步数限制；
 - 无需 API key 的离线演示模式；
+- 可视化 Web 工作台，可输入 Prompt、设置工作区并实时查看运行轨迹；
+- 本地前后端 API，支持任务状态、步数/工具统计、停止请求和最终结果；
 - 仅使用 Python 标准库，运行时零第三方依赖。
 
 ## 工作原理
@@ -39,6 +41,8 @@
 - `src/coding_agent/models.py`：DeepSeek API 调用与输出解析；
 - `src/coding_agent/conversation.py`：历史与上下文管理；
 - `src/coding_agent/tools/`：工具定义、校验和本地执行。
+- `src/coding_agent/webapp.py`：本地 HTTP API、任务管理与静态资源服务；
+- `src/coding_agent/web/`：可视化前端页面。
 
 更详细的设计说明见 [`docs/architecture.md`](docs/architecture.md)。
 
@@ -88,6 +92,42 @@ export DEEPSEEK_MODEL="deepseek-v4-pro"
 | `CODING_AGENT_COMMAND_TIMEOUT` | `30` | 本地命令默认超时秒数 |
 | `CODING_AGENT_ALLOWED_COMMANDS` | 空 | 额外允许的命令，以英文逗号分隔 |
 
+### 使用 `.env`
+
+项目启动时会自动加载根目录下的 `.env`，且不会覆盖终端中已设置的同名变量。`.env` 已被 Git 忽略，不要提交真实 API Key。
+
+```dotenv
+DEEPSEEK_API_KEY=你的_API_key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-pro
+```
+
+## 启动可视化网页
+
+在项目根目录执行：
+
+```bash
+python3 main.py --web
+```
+
+然后浏览器打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。页面中可以：
+
+1. 填写 Agent 允许访问的工作区；
+2. 输入编程任务 Prompt；
+3. 选择真实 DeepSeek 或离线演示；
+4. 查看每次模型决策、工具参数、工具结果和最终回答；
+5. 对运行中任务发出停止请求。
+
+可选的启动参数：
+
+```text
+--workspace PATH   网页默认工作区
+--host HOST        绑定地址，默认 127.0.0.1
+--port PORT        端口，默认 8765
+```
+
+Web 界面默认只监听本机回环地址。Agent 需要访问你指定的本地代码目录和执行本地测试，因此它不是纯静态网站，不建议直接暴露到公网。
+
 ## 运行真实任务
 
 ```bash
@@ -107,6 +147,7 @@ python3 main.py --workspace /path/to/project
 --max-steps N      覆盖最大模型轮数
 --quiet            隐藏中间工具事件
 --demo             使用离线脚本模型，不请求 API
+--web              启动本地可视化 Web 界面
 ```
 
 ## 可用工具
@@ -134,6 +175,8 @@ python3 -m unittest discover -s tests -v
 - Agent 多轮工具循环、终止条件和最大步数；
 - 上下文裁剪时保持 tool call/result 配对；
 - 无 API key 的 CLI 离线端到端演示。
+- `.env` 安全加载与环境变量优先级；
+- Web 静态页面、配置接口、请求防护和离线端到端任务。
 
 ## 视频演示用示例任务
 
@@ -161,8 +204,8 @@ python3 main.py --workspace examples/bugfix_demo \
 
 ## 已知限制
 
-- 当前只实现命令行界面；
-- 当前未实现流式输出；
+- Web 界面使用短轮询获取进度，尚未实现 SSE/WebSocket 流式通道；
+- 模型 API 请求进行期间无法强制中断，停止请求会在当前请求返回后生效；
 - 上下文压缩采用完整工具轮次裁剪，没有调用额外模型生成摘要；
 - 命令安全策略是基础防护，不等同于强隔离；
 - 未配置真实 API key 时只能运行离线演示。

@@ -8,7 +8,7 @@ import sys
 from typing import Any, Mapping, Sequence
 
 from .agent import Agent, AgentError
-from .config import Settings
+from .config import Settings, load_env_file
 from .models import DeepSeekChatModel, ModelAPIError, ScriptedDemoModel
 from .tools import (
     ListFilesTool,
@@ -48,6 +48,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Hide intermediate model and tool events",
     )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="Start the local visual web interface",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Web server host (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="Web server port (default: 8765)",
+    )
     return parser
 
 
@@ -83,8 +99,18 @@ def event_printer(event: str, payload: Mapping[str, Any]) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        load_env_file(Path.cwd() / ".env")
         settings = Settings.from_env().with_max_steps(args.max_steps)
         workspace = Path(args.workspace).expanduser().resolve()
+        if args.web:
+            from .webapp import run_web_server
+
+            return run_web_server(
+                settings,
+                host=args.host,
+                port=args.port,
+                default_workspace=workspace,
+            )
         registry = build_registry(workspace, settings.command_timeout)
         model = ScriptedDemoModel() if args.demo else DeepSeekChatModel(settings)
 

@@ -4,6 +4,35 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import os
+from pathlib import Path
+import re
+
+
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def load_env_file(path: Path) -> None:
+    """Load a small KEY=VALUE file without printing or overwriting shell values."""
+    if not path.is_file():
+        return
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            raise ValueError(f"Invalid .env entry on line {line_number}")
+        name, value = line.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if not ENV_NAME.fullmatch(name):
+            raise ValueError(f"Invalid environment name on line {line_number}")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(name, value)
 
 
 def _positive_int(name: str, default: int) -> int:

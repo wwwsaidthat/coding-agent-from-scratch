@@ -7,7 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from coding_agent.agent import Agent, AgentError, AgentLimitError
+from coding_agent.agent import Agent, AgentCancelledError, AgentError, AgentLimitError
 from coding_agent.cli import build_registry, main
 from coding_agent.models import ModelResponse, ScriptedDemoModel, ToolCall
 
@@ -55,6 +55,16 @@ class AgentLoopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             agent = Agent(EmptyModel(), build_registry(Path(temporary), 10))
             with self.assertRaises(AgentError):
+                agent.run("Do something")
+
+    def test_cancellation_stops_before_model_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            agent = Agent(
+                EmptyModel(),
+                build_registry(Path(temporary), 10),
+                should_stop=lambda: True,
+            )
+            with self.assertRaises(AgentCancelledError):
                 agent.run("Do something")
 
     def test_cli_demo_runs_without_api_key(self) -> None:

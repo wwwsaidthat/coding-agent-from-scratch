@@ -12,6 +12,7 @@ from .tools.registry import ToolRegistry
 
 
 EventHandler = Callable[[str, Mapping[str, Any]], None]
+StopChecker = Callable[[], bool]
 
 
 class AgentError(RuntimeError):
@@ -20,6 +21,10 @@ class AgentError(RuntimeError):
 
 class AgentLimitError(AgentError):
     """Raised when the local step budget is exhausted."""
+
+
+class AgentCancelledError(AgentError):
+    """Raised when a caller requests cancellation between agent actions."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +44,7 @@ class Agent:
         max_steps: int = 20,
         max_context_chars: int = 120_000,
         on_event: EventHandler | None = None,
+        should_stop: StopChecker | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be greater than zero")
@@ -47,6 +53,7 @@ class Agent:
         self.max_steps = max_steps
         self.max_context_chars = max_context_chars
         self.on_event = on_event
+        self.should_stop = should_stop
 
     def run(self, task: str) -> AgentResult:
         if not task.strip():
@@ -62,6 +69,7 @@ class Agent:
         repeated_calls = 0
 
         for step in range(1, self.max_steps + 1):
+            self._check_cancelled()
             self._emit("model_request", {"step": step})
             response = self.model.complete(
                 conversation.api_messages(), self.tools.definitions
@@ -87,6 +95,7 @@ class Agent:
             assistant_message = self._assistant_message(response)
             tool_messages: list[dict[str, Any]] = []
             for call in response.tool_calls:
+                self._check_cancelled()
                 tool_call_count += 1
                 fingerprint = (call.name, call.arguments)
                 if fingerprint == previous_fingerprint:
@@ -145,3 +154,7 @@ class Agent:
     def _emit(self, event: str, payload: Mapping[str, Any]) -> None:
         if self.on_event is not None:
             self.on_event(event, payload)
+
+    def _check_cancelled(self) -> None:
+        if self.should_stop is not None and self.should_stop():
+            raise AgentCancelledError("Agent run was cancelled")
