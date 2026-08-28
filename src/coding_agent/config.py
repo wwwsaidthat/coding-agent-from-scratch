@@ -60,6 +60,11 @@ class Settings:
     max_steps: int = 20
     api_timeout: int = 90
     command_timeout: int = 30
+    qwen_api_key: str | None = None
+    qwen_base_url: str = (
+        "https://YOUR_WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    )
+    qwen_model: str = "qwen3.6-flash"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -82,6 +87,12 @@ class Settings:
             max_steps=_positive_int("CODING_AGENT_MAX_STEPS", 20),
             api_timeout=_positive_int("CODING_AGENT_API_TIMEOUT", 90),
             command_timeout=_positive_int("CODING_AGENT_COMMAND_TIMEOUT", 30),
+            qwen_api_key=os.getenv("QWEN_API_KEY"),
+            qwen_base_url=os.getenv(
+                "QWEN_BASE_URL",
+                "https://YOUR_WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            ),
+            qwen_model=os.getenv("QWEN_MODEL", "qwen3.6-flash"),
         )
 
     def require_api_key(self) -> "Settings":

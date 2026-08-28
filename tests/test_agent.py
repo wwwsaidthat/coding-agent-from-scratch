@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from coding_agent.agent import Agent, AgentCancelledError, AgentError, AgentLimitError
 from coding_agent.cli import build_registry, main
+from coding_agent.conversation import Conversation
 from coding_agent.models import ModelResponse, ScriptedDemoModel, ToolCall
 
 
@@ -27,19 +28,41 @@ class EmptyModel:
         return ModelResponse(content=None)
 
 
+class ContextRecordingModel:
+    def __init__(self):
+        self.requests = []
+
+    def complete(self, messages, tools):
+        del tools
+        self.requests.append(messages)
+        return ModelResponse(content="turn complete")
+
+
 class AgentLoopTests(unittest.TestCase):
     def test_offline_model_completes_full_tool_loop(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            events = []
             agent = Agent(
-                ScriptedDemoModel(), build_registry(root, 10), max_steps=10
+                ScriptedDemoModel(),
+                build_registry(root, 10),
+                max_steps=10,
+                on_event=lambda event, payload: events.append((event, payload)),
             )
             result = agent.run("Run the demo")
 
-            self.assertEqual(result.steps, 4)
-            self.assertEqual(result.tool_calls, 3)
+            self.assertEqual(result.steps, 5)
+            self.assertEqual(result.tool_calls, 4)
             self.assertTrue((root / "agent_demo.txt").is_file())
             self.assertIn("Offline demo completed", result.final_output)
+            decisions = [payload for event, payload in events if event == "model_response"]
+            self.assertEqual(len(decisions), 5)
+            self.assertTrue(all(payload["thought"] for payload in decisions))
+            self.assertTrue(all("duration_ms" in payload for payload in decisions))
+            self.assertTrue(all("reasoning_content" not in payload for payload in decisions))
+            tool_results = [payload for event, payload in events if event == "tool_finish"]
+            self.assertTrue(all("arguments" in payload for payload in tool_results))
+            self.assertTrue(all("duration_ms" in payload for payload in tool_results))
 
     def test_step_limit_stops_nonterminating_model(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -66,6 +89,30 @@ class AgentLoopTests(unittest.TestCase):
             )
             with self.assertRaises(AgentCancelledError):
                 agent.run("Do something")
+
+    def test_agent_reuses_context_across_user_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model = ContextRecordingModel()
+            conversation = Conversation("system")
+            agent = Agent(model, build_registry(Path(temporary), 10))
+
+            agent.run("inspect the project", conversation=conversation)
+            agent.run("continue with the same project", conversation=conversation)
+
+            second_request = model.requests[1]
+            visible_messages = [
+                (message["role"], message.get("content"))
+                for message in second_request
+                if message["role"] in {"user", "assistant"}
+            ]
+            self.assertEqual(
+                visible_messages,
+                [
+                    ("user", "inspect the project"),
+                    ("assistant", "turn complete"),
+                    ("user", "continue with the same project"),
+                ],
+            )
 
     def test_cli_demo_runs_without_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -1,4 +1,5 @@
 from pathlib import Path
+import base64
 import json
 import os
 import sys
@@ -14,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from coding_agent.config import Settings, load_env_file
-from coding_agent.webapp import create_http_server
+from coding_agent.webapp import LocalWebApplication, RunRecord, RunStore, create_http_server
 
 
 class EnvFileTests(unittest.TestCase):
@@ -83,6 +84,34 @@ class WebApplicationTests(unittest.TestCase):
         with urlopen(request, timeout=3) as response:
             return json.loads(response.read().decode("utf-8"))
 
+    def delete_json(self, path: str, *, include_client: bool = True) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if include_client:
+            headers["X-Agent-Client"] = "web-ui"
+        request = Request(
+            self.base_url + path,
+            data=b"{}",
+            method="DELETE",
+            headers=headers,
+        )
+        with urlopen(request, timeout=3) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def wait_for_run(self, run: dict, timeout: float = 5) -> dict:
+        deadline = time.monotonic() + timeout
+        while run["status"] in {"queued", "running", "waiting_approval"}:
+            if run["status"] == "waiting_approval":
+                approval = run["pending_approval"]
+                run = self.post_json(
+                    f"/api/runs/{run['id']}/approvals/{approval['id']}",
+                    {"approved": True},
+                )
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.03)
+            run = self.get_json(f"/api/runs/{run['id']}")
+        return run
+
     def test_health_config_and_static_page(self) -> None:
         self.assertTrue(self.get_json("/api/health")["ok"])
         config = self.get_json("/api/config")
@@ -91,7 +120,20 @@ class WebApplicationTests(unittest.TestCase):
         with urlopen(self.base_url + "/", timeout=3) as response:
             html = response.read().decode("utf-8")
             self.assertIn("LOOPCODER", html)
+            self.assertIn('id="session-list"', html)
+            self.assertIn('id="approval-card"', html)
+            self.assertIn('id="image-input"', html)
+            self.assertIn('id="run-plan"', html)
+            self.assertLess(html.index('id="conversation-memory-title"'), html.index('id="activity-title"'))
+            self.assertNotIn('id="result-card"', html)
+            self.assertIn("执行路径与确认", html)
             self.assertIn("Content-Security-Policy", response.headers)
+        with urlopen(self.base_url + "/assets/app.js", timeout=3) as response:
+            javascript = response.read().decode("utf-8")
+            self.assertIn("function renderMarkdown", javascript)
+            self.assertIn("function deleteSession", javascript)
+            self.assertIn('method: "DELETE"', javascript)
+            self.assertNotIn(".innerHTML", javascript)
 
     def test_post_requires_same_origin_client_header(self) -> None:
         with self.assertRaises(HTTPError) as caught:
@@ -103,6 +145,7 @@ class WebApplicationTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 403)
 
     def test_offline_demo_completes_through_http_api(self) -> None:
+        (self.workspace / "agent_demo.txt").write_text("old value\n", encoding="utf-8")
         created = self.post_json(
             "/api/runs",
             {
@@ -112,22 +155,220 @@ class WebApplicationTests(unittest.TestCase):
                 "max_steps": 10,
             },
         )
-        self.assertIn(created["status"], {"queued", "running", "completed"})
+        self.assertIn(
+            created["status"],
+            {"queued", "running", "waiting_approval", "completed"},
+        )
 
-        deadline = time.monotonic() + 4
+        deadline = time.monotonic() + 5
         current = created
-        while current["status"] in {"queued", "running"} and time.monotonic() < deadline:
+        observed_diff = None
+        while current["status"] in {"queued", "running", "waiting_approval"} and time.monotonic() < deadline:
+            if current["status"] == "waiting_approval":
+                approval = current["pending_approval"]
+                observed_diff = approval["proposal"]["files"][0]["diff"]
+                current = self.post_json(
+                    f"/api/runs/{current['id']}/approvals/{approval['id']}",
+                    {"approved": True},
+                )
             time.sleep(0.05)
             current = self.get_json(f"/api/runs/{created['id']}")
 
         self.assertEqual(current["status"], "completed")
-        self.assertEqual(current["steps"], 4)
-        self.assertEqual(current["tool_calls"], 3)
+        self.assertEqual(current["steps"], 5)
+        self.assertEqual(current["tool_calls"], 4)
         self.assertIn("Offline demo completed", current["final_output"])
+        self.assertIn("-old value", observed_diff)
+        self.assertIn("+Created by the offline agent demo.", observed_diff)
         self.assertTrue((self.workspace / "agent_demo.txt").is_file())
         event_types = {event["type"] for event in current["events"]}
         self.assertIn("tool_start", event_types)
         self.assertIn("completed", event_types)
+        decisions = [
+            event for event in current["events"] if event["type"] == "model_response"
+        ]
+        self.assertTrue(all(event["payload"]["thought"] for event in decisions))
+        self.assertTrue(
+            all("reasoning_content" not in event["payload"] for event in decisions)
+        )
+        self.assertIsNotNone(current["duration_ms"])
+        trace_path = self.workspace / ".coding-agent" / "traces" / f"{created['id']}.json"
+        self.assertTrue(trace_path.is_file())
+        trace = json.loads(trace_path.read_text(encoding="utf-8"))["trace"]
+        self.assertEqual(trace["status"], "completed")
+        self.assertIn("model_usage", trace)
+        traced_request = next(
+            event for event in trace["events"] if event["type"] == "model_request"
+        )
+        self.assertIn("request_messages", traced_request["payload"])
+        public_request = next(
+            event for event in current["events"] if event["type"] == "model_request"
+        )
+        self.assertNotIn("request_messages", public_request["payload"])
+
+    def test_multi_turn_session_is_persisted_and_restored(self) -> None:
+        session = self.post_json(
+            "/api/sessions",
+            {
+                "workspace": str(self.workspace),
+                "demo": True,
+                "max_steps": 10,
+            },
+        )
+
+        for prompt in ("first turn", "follow-up turn"):
+            run = self.post_json(
+                f"/api/sessions/{session['id']}/messages",
+                {"content": prompt},
+            )
+            run = self.wait_for_run(run)
+            self.assertEqual(run["status"], "completed")
+
+        current = self.get_json(f"/api/sessions/{session['id']}")
+        self.assertEqual(current["turn_count"], 2)
+        self.assertEqual(
+            [message["role"] for message in current["messages"]],
+            ["user", "assistant", "user", "assistant"],
+        )
+        self.assertEqual(current["context"]["total_exchanges"], 2)
+
+        restored_app = LocalWebApplication(
+            Settings(api_key=None, max_steps=10, command_timeout=5),
+            self.workspace,
+        )
+        restored = restored_app.runs.get_session_public(session["id"])
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored["turn_count"], 2)
+        self.assertEqual(restored["messages"][-1]["role"], "assistant")
+        restored_prompt = restored_app.runs._sessions[session["id"]].conversation.api_messages()[0]["content"]
+        self.assertIn("deepseek-v4-pro", restored_prompt)
+        self.assertIn("qwen3.6-flash", restored_prompt)
+
+    def test_session_loads_workspace_project_rules(self) -> None:
+        (self.workspace / "AGENTS.md").write_text(
+            "Always validate the smallest relevant scope.", encoding="utf-8"
+        )
+        session = self.post_json(
+            "/api/sessions",
+            {"workspace": str(self.workspace), "demo": True, "max_steps": 10},
+        )
+        self.assertGreater(session["context"]["project_rules_chars"], 0)
+
+    def test_image_upload_is_bound_to_session_and_message(self) -> None:
+        session = self.post_json(
+            "/api/sessions",
+            {"workspace": str(self.workspace), "demo": True, "max_steps": 10},
+        )
+        image = b"\x89PNG\r\n\x1a\n" + b"local-image"
+        uploaded = self.post_json(
+            f"/api/sessions/{session['id']}/images",
+            {
+                "filename": "screen.png",
+                "data_base64": base64.b64encode(image).decode("ascii"),
+            },
+        )
+        self.assertTrue(uploaded["path"].startswith(f".agent-images/{session['id']}/"))
+        run = self.post_json(
+            f"/api/sessions/{session['id']}/messages",
+            {"content": "inspect this", "attachments": [uploaded["path"]]},
+        )
+        run = self.wait_for_run(run)
+        current = self.get_json(f"/api/sessions/{session['id']}")
+        self.assertEqual(current["messages"][0]["attachments"], [uploaded["path"]])
+
+    def test_delete_session_removes_messages_traces_and_uploaded_images(self) -> None:
+        session = self.post_json(
+            "/api/sessions",
+            {"workspace": str(self.workspace), "demo": True, "max_steps": 10},
+        )
+        uploaded = self.post_json(
+            f"/api/sessions/{session['id']}/images",
+            {
+                "filename": "delete-me.png",
+                "data_base64": base64.b64encode(
+                    b"\x89PNG\r\n\x1a\n" + b"delete-me"
+                ).decode("ascii"),
+            },
+        )
+        run = self.post_json(
+            f"/api/sessions/{session['id']}/messages",
+            {"content": "temporary conversation", "attachments": [uploaded["path"]]},
+        )
+        run = self.wait_for_run(run)
+        self.assertEqual(run["status"], "completed")
+        session_file = self.workspace / ".coding-agent" / "sessions" / f"{session['id']}.json"
+        trace_file = self.workspace / ".coding-agent" / "traces" / f"{run['id']}.json"
+        image_file = self.workspace / uploaded["path"]
+        self.assertTrue(session_file.is_file())
+        self.assertTrue(trace_file.is_file())
+        self.assertTrue(image_file.is_file())
+
+        deleted = self.delete_json(f"/api/sessions/{session['id']}")
+        self.assertTrue(deleted["deleted"])
+        self.assertFalse(session_file.exists())
+        self.assertFalse(trace_file.exists())
+        self.assertFalse(image_file.exists())
+        self.assertFalse(
+            any(
+                item["id"] == session["id"]
+                for item in self.get_json("/api/sessions")["sessions"]
+            )
+        )
+
+    def test_session_list_does_not_expose_conversation_in_summary(self) -> None:
+        created = self.post_json(
+            "/api/sessions",
+            {"workspace": str(self.workspace), "demo": True, "max_steps": 10},
+        )
+        listed = self.get_json("/api/sessions")["sessions"]
+        matching = next(item for item in listed if item["id"] == created["id"])
+        self.assertNotIn("messages", matching)
+        self.assertNotIn("conversation", matching)
+
+    def test_trace_aggregates_tokens_and_final_test_result(self) -> None:
+        store = RunStore(
+            Settings(api_key=None, max_steps=10, command_timeout=5),
+            self.workspace / "trace-test" / "sessions",
+        )
+        record = RunRecord(
+            id="trace-unit",
+            session_id="session-unit",
+            turn=1,
+            task="run tests",
+            workspace=str(self.workspace),
+            demo=True,
+            max_steps=10,
+        )
+        with store._lock:
+            store._append_locked(
+                record,
+                "model_response",
+                {
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+                    "request_messages": [{"role": "user", "content": "private"}],
+                },
+            )
+            store._append_locked(
+                record,
+                "tool_finish",
+                {
+                    "name": "run_command",
+                    "arguments": '{"argv":["python3","-m","unittest"]}',
+                    "result": '{"success":true,"metadata":{"exit_code":0}}',
+                    "success": True,
+                    "duration_ms": 12.5,
+                },
+            )
+        self.assertEqual(record.model_usage["total_tokens"], 14)
+        self.assertTrue(record.final_test_result["success"])
+        self.assertEqual(record.final_test_result["exit_code"], 0)
+        self.assertTrue((store.trace_dir / "trace-unit.json").is_file())
+        restored = RunStore(
+            Settings(api_key=None, max_steps=10, command_timeout=5),
+            self.workspace / "trace-test" / "sessions",
+        ).get_public("trace-unit")
+        self.assertIsNotNone(restored)
+        self.assertNotIn("request_messages", restored["events"][0]["payload"])
 
 
 if __name__ == "__main__":

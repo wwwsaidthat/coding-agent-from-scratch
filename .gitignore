@@ -1,7 +1,5 @@
 # Secrets and local configuration
 .env
-.env.*
-!.env.example
 *.pem
 *.key
 
@@ -24,4 +22,5 @@ dist/
 
 # Agent scratch output
 .coding-agent/
+.agent-images/
 agent_demo.txt

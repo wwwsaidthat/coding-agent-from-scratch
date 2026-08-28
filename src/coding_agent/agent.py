@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Callable, Mapping
 
 from .conversation import Conversation
@@ -55,28 +56,62 @@ class Agent:
         self.on_event = on_event
         self.should_stop = should_stop
 
-    def run(self, task: str) -> AgentResult:
+    def run(self, task: str, *, conversation: Conversation | None = None) -> AgentResult:
         if not task.strip():
             raise ValueError("Task must not be empty")
 
-        conversation = Conversation(
-            SYSTEM_PROMPT,
-            task.strip(),
-            max_context_chars=self.max_context_chars,
-        )
+        if conversation is None:
+            conversation = Conversation(
+                SYSTEM_PROMPT,
+                max_context_chars=self.max_context_chars,
+            )
+        conversation.start_user_turn(task)
         tool_call_count = 0
         previous_fingerprint: tuple[str, str] | None = None
         repeated_calls = 0
 
         for step in range(1, self.max_steps + 1):
             self._check_cancelled()
-            self._emit("model_request", {"step": step})
-            response = self.model.complete(
-                conversation.api_messages(), self.tools.definitions
+            request_messages = conversation.api_messages()
+            request_started = time.perf_counter()
+            self._emit(
+                "model_request",
+                {
+                    "step": step,
+                    "message_count": len(request_messages),
+                    "tool_definition_count": len(self.tools.definitions),
+                    "request_messages": self._trace_messages(request_messages),
+                    "tool_definitions": self.tools.definitions,
+                },
             )
+            try:
+                response = self.model.complete(request_messages, self.tools.definitions)
+            except Exception as exc:
+                self._emit(
+                    "model_error",
+                    {
+                        "step": step,
+                        "duration_ms": round(
+                            (time.perf_counter() - request_started) * 1_000, 2
+                        ),
+                        "error_type": type(exc).__name__,
+                        "error_code": self._error_code(exc),
+                        "message": str(exc),
+                    },
+                )
+                raise
+            duration_ms = round((time.perf_counter() - request_started) * 1_000, 2)
             self._emit(
                 "model_response",
-                {"step": step, "tool_call_count": len(response.tool_calls)},
+                {
+                    "step": step,
+                    "tool_call_count": len(response.tool_calls),
+                    "thought": self._public_decision_summary(response),
+                    "duration_ms": duration_ms,
+                    "model": response.metadata.get("model"),
+                    "request_id": response.metadata.get("id"),
+                    "usage": response.metadata.get("usage"),
+                },
             )
 
             if not response.tool_calls:
@@ -110,11 +145,24 @@ class Agent:
                         'after three consecutive attempts.","metadata":{"code":'
                         '"RepeatedToolCall"}}'
                     )
+                    self._emit(
+                        "tool_finish",
+                        {
+                            "step": step,
+                            "name": call.name,
+                            "arguments": call.arguments,
+                            "success": False,
+                            "result": result_json,
+                            "duration_ms": 0,
+                            "error_code": "RepeatedToolCall",
+                        },
+                    )
                 else:
                     self._emit(
                         "tool_start",
                         {"step": step, "name": call.name, "arguments": call.arguments},
                     )
+                    tool_started = time.perf_counter()
                     result = self.tools.execute(call.name, call.arguments)
                     result_json = result.to_json()
                     self._emit(
@@ -122,8 +170,14 @@ class Agent:
                         {
                             "step": step,
                             "name": call.name,
+                            "arguments": call.arguments,
                             "success": result.success,
                             "result": result_json,
+                            "duration_ms": round(
+                                (time.perf_counter() - tool_started) * 1_000, 2
+                            ),
+                            "error_code": result.metadata.get("code"),
+                            "metadata": dict(result.metadata),
                         },
                     )
 
@@ -155,6 +209,41 @@ class Agent:
         if self.on_event is not None:
             self.on_event(event, payload)
 
+    @staticmethod
+    def _public_decision_summary(response: ModelResponse) -> str:
+        """Return a concise, user-visible rationale without exposing hidden reasoning."""
+        if not response.tool_calls:
+            return "根据当前上下文，模型判断任务已完成，准备给出最终回答。"
+
+        public_content = (response.content or "").strip()
+        if public_content:
+            if len(public_content) > 2_000:
+                return public_content[:2_000] + "…"
+            return public_content
+
+        names = list(dict.fromkeys(call.name for call in response.tool_calls))
+        tools = "、".join(names)
+        return f"为继续推进任务，本轮决定调用 {tools} 获取信息或执行操作。"
+
     def _check_cancelled(self) -> None:
         if self.should_stop is not None and self.should_stop():
             raise AgentCancelledError("Agent run was cancelled")
+
+    @staticmethod
+    def _error_code(exc: Exception) -> str:
+        text = str(exc)
+        if "HTTP " in text:
+            suffix = text.split("HTTP ", 1)[1].split(":", 1)[0].strip()
+            if suffix.isdigit():
+                return f"HTTP_{suffix}"
+        return type(exc).__name__
+
+    @staticmethod
+    def _trace_messages(
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Copy request messages without exposing provider hidden reasoning fields."""
+        return [
+            {key: value for key, value in message.items() if key != "reasoning_content"}
+            for message in messages
+        ]

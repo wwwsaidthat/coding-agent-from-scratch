@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coding-agent-from-scratch"
-version = "0.2.0"
+version = "0.4.0"
 description = "A lightweight coding agent built from scratch with local file and command tools."
 readme = "README.md"
 requires-python = ">=3.10"

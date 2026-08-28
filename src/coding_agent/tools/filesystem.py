@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import difflib
+import hashlib
 import os
 from pathlib import Path
-from typing import Any, Mapping
+import threading
+from typing import Any, Callable, Mapping, Sequence
+from uuid import uuid4
 
 from .base import (
     ToolExecutionError,
@@ -20,8 +25,41 @@ from .base import (
 MAX_READ_BYTES = 1_000_000
 MAX_WRITE_BYTES = 1_000_000
 MAX_LIST_ENTRIES = 500
-DENIED_NAMES = {".env", ".git-credentials", "id_rsa", "id_ed25519"}
-IGNORED_DIRECTORIES = {".git", ".venv", "venv", "__pycache__", "node_modules"}
+MAX_DIFF_CHARS = 80_000
+DENIED_NAMES = {
+    ".env",
+    ".coding-agent",
+    ".git-credentials",
+    "id_rsa",
+    "id_ed25519",
+}
+IGNORED_DIRECTORIES = {
+    ".git",
+    ".coding-agent",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "node_modules",
+    ".agent-images",
+}
+
+
+ApprovalHandler = Callable[[Mapping[str, Any]], bool]
+EditApprovalHandler = ApprovalHandler
+
+
+@dataclass(frozen=True, slots=True)
+class FileRevision:
+    size: int
+    modified_ns: int
+    sha256: str
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "size": self.size,
+            "modified_ns": self.modified_ns,
+            "sha256": self.sha256,
+        }
 
 
 class WorkspacePaths:
@@ -29,6 +67,8 @@ class WorkspacePaths:
         self.root = root.expanduser().resolve()
         if not self.root.is_dir():
             raise ValueError(f"Workspace does not exist or is not a directory: {self.root}")
+        self.edit_lock = threading.RLock()
+        self._revisions: dict[Path, FileRevision] = {}
 
     def resolve(self, user_path: str, *, allow_missing: bool = False) -> Path:
         del allow_missing  # Kept in the public helper signature for caller clarity.
@@ -48,6 +88,78 @@ class WorkspacePaths:
         for part in relative_parts:
             if part in DENIED_NAMES or part.startswith(".env"):
                 raise ToolExecutionError("SensitivePath", f"Access denied: {part}")
+
+    def remember_revision(self, path: Path, content: bytes) -> FileRevision:
+        stat = path.stat()
+        revision = FileRevision(
+            size=len(content),
+            modified_ns=stat.st_mtime_ns,
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+        self._revisions[path] = revision
+        return revision
+
+    def require_current_revision(self, path: Path) -> tuple[bytes, FileRevision]:
+        expected = self._revisions.get(path)
+        if expected is None:
+            raise ToolExecutionError(
+                "ReadRequired",
+                "File must be read with read_file before it can be edited",
+            )
+        try:
+            content = path.read_bytes()
+            stat = path.stat()
+        except FileNotFoundError as exc:
+            raise ToolExecutionError(
+                "Conflict", "File changed or was removed after reading"
+            ) from exc
+        current = FileRevision(
+            size=len(content),
+            modified_ns=stat.st_mtime_ns,
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+        if current != expected:
+            raise ToolExecutionError(
+                "Conflict",
+                "File changed after it was read; read the latest version before editing",
+            )
+        return content, current
+
+
+def _diff(relative: str, before: str, after: str) -> tuple[str, bool]:
+    rendered = "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"a/{relative}",
+            tofile=f"b/{relative}",
+        )
+    )
+    truncated = len(rendered) > MAX_DIFF_CHARS
+    if truncated:
+        rendered = rendered[:MAX_DIFF_CHARS] + "\n… diff truncated …\n"
+    return rendered or f"--- a/{relative}\n+++ b/{relative}\n(no textual change)\n", truncated
+
+
+def _request_approval(
+    handler: EditApprovalHandler | None,
+    tool: str,
+    files: Sequence[Mapping[str, Any]],
+) -> None:
+    if handler is None:
+        return
+    if not handler({"tool": tool, "files": list(files)}):
+        raise ToolExecutionError("EditRejected", "User rejected the proposed code change")
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.coding-agent-{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(content, encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class ListFilesTool:
@@ -150,9 +262,12 @@ class ReadFileTool:
             raise ToolExecutionError("FileTooLarge", "File is larger than 1 MB")
 
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            content = path.read_bytes()
+            lines = content.decode("utf-8").splitlines()
         except UnicodeDecodeError as exc:
             raise ToolExecutionError("NotText", "File is not valid UTF-8 text") from exc
+        with self.paths.edit_lock:
+            revision = self.paths.remember_revision(path, content)
 
         selected = lines[start - 1 : end]
         numbered = "\n".join(
@@ -165,6 +280,7 @@ class ReadFileTool:
             start_line=start,
             end_line=min(end, len(lines)),
             truncated=end < len(lines),
+            revision=revision.public(),
         )
 
 
@@ -188,8 +304,13 @@ class WriteFileTool:
         "additionalProperties": False,
     }
 
-    def __init__(self, paths: WorkspacePaths) -> None:
+    def __init__(
+        self,
+        paths: WorkspacePaths,
+        approval_handler: EditApprovalHandler | None = None,
+    ) -> None:
         self.paths = paths
+        self.approval_handler = approval_handler
 
     def run(self, arguments: Mapping[str, Any]) -> ToolResult:
         reject_unknown(arguments, {"path", "content", "overwrite"})
@@ -203,16 +324,42 @@ class WriteFileTool:
             raise ToolExecutionError("FileTooLarge", "Content is larger than 1 MB")
 
         path = self.paths.resolve(relative, allow_missing=True)
-        if path.exists() and not overwrite:
-            raise ToolExecutionError(
-                "AlreadyExists", f"File already exists: {relative}; use overwrite=true"
-            )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(path.name + ".coding-agent.tmp")
-        temporary.write_text(content, encoding="utf-8")
-        temporary.replace(path)
+        with self.paths.edit_lock:
+            existed = path.exists()
+            if existed and not overwrite:
+                raise ToolExecutionError(
+                    "AlreadyExists", f"File already exists: {relative}; use overwrite=true"
+                )
+            if existed:
+                old_bytes, _ = self.paths.require_current_revision(path)
+                try:
+                    old_content = old_bytes.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ToolExecutionError("NotText", "Existing file is not UTF-8") from exc
+            else:
+                old_content = ""
+            rendered_diff, truncated = _diff(relative, old_content, content)
+
+        _request_approval(
+            self.approval_handler,
+            self.name,
+            [{"path": relative, "diff": rendered_diff, "truncated": truncated}],
+        )
+
+        with self.paths.edit_lock:
+            if existed:
+                self.paths.require_current_revision(path)
+            elif path.exists():
+                raise ToolExecutionError(
+                    "Conflict", "File was created by another process before approval"
+                )
+            _atomic_write(path, content)
+            revision = self.paths.remember_revision(path, encoded)
         return ToolResult.ok(
-            f"Wrote {relative}", path=relative, bytes_written=len(encoded)
+            f"Wrote {relative}",
+            path=relative,
+            bytes_written=len(encoded),
+            revision=revision.public(),
         )
 
 
@@ -239,8 +386,13 @@ class ReplaceInFileTool:
         "additionalProperties": False,
     }
 
-    def __init__(self, paths: WorkspacePaths) -> None:
+    def __init__(
+        self,
+        paths: WorkspacePaths,
+        approval_handler: EditApprovalHandler | None = None,
+    ) -> None:
         self.paths = paths
+        self.approval_handler = approval_handler
 
     def run(self, arguments: Mapping[str, Any]) -> ToolResult:
         reject_unknown(
@@ -255,27 +407,190 @@ class ReplaceInFileTool:
             arguments, "expected_replacements", 1, minimum=1, maximum=100
         )
         path = self.paths.resolve(relative)
-        if not path.is_file():
-            raise ToolExecutionError("NotFile", f"Not a file: {relative}")
-        if path.stat().st_size > MAX_READ_BYTES:
-            raise ToolExecutionError("FileTooLarge", "File is larger than 1 MB")
-        try:
-            content = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError as exc:
-            raise ToolExecutionError("NotText", "File is not valid UTF-8 text") from exc
+        with self.paths.edit_lock:
+            if not path.is_file():
+                raise ToolExecutionError("NotFile", f"Not a file: {relative}")
+            old_bytes, _ = self.paths.require_current_revision(path)
+            try:
+                content = old_bytes.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ToolExecutionError("NotText", "File is not valid UTF-8 text") from exc
+            actual = content.count(old_text)
+            if actual != expected:
+                raise ToolExecutionError(
+                    "ReplacementCountMismatch",
+                    f"Expected {expected} match(es), found {actual}; file was not changed",
+                )
+            updated = content.replace(old_text, new_text)
+            updated_bytes = updated.encode("utf-8")
+            if len(updated_bytes) > MAX_WRITE_BYTES:
+                raise ToolExecutionError("FileTooLarge", "Updated file is larger than 1 MB")
+            rendered_diff, truncated = _diff(relative, content, updated)
 
-        actual = content.count(old_text)
-        if actual != expected:
-            raise ToolExecutionError(
-                "ReplacementCountMismatch",
-                f"Expected {expected} match(es), found {actual}; file was not changed",
-            )
-        updated = content.replace(old_text, new_text)
-        if len(updated.encode("utf-8")) > MAX_WRITE_BYTES:
-            raise ToolExecutionError("FileTooLarge", "Updated file would be larger than 1 MB")
-        temporary = path.with_name(path.name + ".coding-agent.tmp")
-        temporary.write_text(updated, encoding="utf-8")
-        temporary.replace(path)
+        _request_approval(
+            self.approval_handler,
+            self.name,
+            [{"path": relative, "diff": rendered_diff, "truncated": truncated}],
+        )
+
+        with self.paths.edit_lock:
+            self.paths.require_current_revision(path)
+            _atomic_write(path, updated)
+            revision = self.paths.remember_revision(path, updated_bytes)
         return ToolResult.ok(
-            f"Updated {relative}", path=relative, replacements=actual
+            f"Updated {relative}",
+            path=relative,
+            replacements=actual,
+            revision=revision.public(),
+        )
+
+
+class MultiEditTool:
+    name = "multi_edit"
+    description = (
+        "Atomically apply multiple exact replacements after every target file has been read. "
+        "All edits are validated before approval and committed together."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "edits": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "old_text": {"type": "string"},
+                        "new_text": {"type": "string"},
+                        "expected_replacements": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                        },
+                    },
+                    "required": ["path", "old_text", "new_text"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["edits"],
+        "additionalProperties": False,
+    }
+
+    def __init__(
+        self,
+        paths: WorkspacePaths,
+        approval_handler: EditApprovalHandler | None = None,
+    ) -> None:
+        self.paths = paths
+        self.approval_handler = approval_handler
+
+    def run(self, arguments: Mapping[str, Any]) -> ToolResult:
+        reject_unknown(arguments, {"edits"})
+        raw_edits = arguments.get("edits")
+        if not isinstance(raw_edits, list) or not 1 <= len(raw_edits) <= 20:
+            raise ToolExecutionError("InvalidArguments", "'edits' must contain 1 to 20 items")
+
+        parsed: list[tuple[str, str, str, int]] = []
+        for raw in raw_edits:
+            if not isinstance(raw, Mapping):
+                raise ToolExecutionError("InvalidArguments", "Every edit must be an object")
+            reject_unknown(
+                raw, {"path", "old_text", "new_text", "expected_replacements"}
+            )
+            path = required_string(raw, "path")
+            old_text = required_string(raw, "old_text")
+            new_text = raw.get("new_text")
+            if not isinstance(new_text, str):
+                raise ToolExecutionError("InvalidArguments", "'new_text' must be a string")
+            expected = optional_int(
+                raw, "expected_replacements", 1, minimum=1, maximum=100
+            )
+            parsed.append((path, old_text, new_text, expected))
+
+        with self.paths.edit_lock:
+            originals: dict[Path, bytes] = {}
+            updated_text: dict[Path, str] = {}
+            relative_names: dict[Path, str] = {}
+            replacements: dict[Path, int] = {}
+            for relative, old_text, new_text, expected in parsed:
+                path = self.paths.resolve(relative)
+                if path not in originals:
+                    original, _ = self.paths.require_current_revision(path)
+                    originals[path] = original
+                    relative_names[path] = relative
+                    try:
+                        updated_text[path] = original.decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise ToolExecutionError("NotText", f"Not UTF-8: {relative}") from exc
+                    replacements[path] = 0
+                current = updated_text[path]
+                actual = current.count(old_text)
+                if actual != expected:
+                    raise ToolExecutionError(
+                        "ReplacementCountMismatch",
+                        f"{relative}: expected {expected} match(es), found {actual}",
+                    )
+                updated_text[path] = current.replace(old_text, new_text)
+                replacements[path] += actual
+
+            proposals: list[dict[str, Any]] = []
+            for path, updated in updated_text.items():
+                encoded = updated.encode("utf-8")
+                if len(encoded) > MAX_WRITE_BYTES:
+                    raise ToolExecutionError(
+                        "FileTooLarge",
+                        f"Updated file is larger than 1 MB: {relative_names[path]}",
+                    )
+                before = originals[path].decode("utf-8")
+                rendered, truncated = _diff(relative_names[path], before, updated)
+                proposals.append(
+                    {
+                        "path": relative_names[path],
+                        "diff": rendered,
+                        "truncated": truncated,
+                    }
+                )
+
+        _request_approval(self.approval_handler, self.name, proposals)
+
+        with self.paths.edit_lock:
+            for path in originals:
+                self.paths.require_current_revision(path)
+            staged: dict[Path, Path] = {}
+            committed: list[Path] = []
+            try:
+                for path, updated in updated_text.items():
+                    temporary = path.with_name(
+                        f".{path.name}.multi-edit-{uuid4().hex}.tmp"
+                    )
+                    temporary.write_text(updated, encoding="utf-8")
+                    staged[path] = temporary
+                for path, temporary in staged.items():
+                    temporary.replace(path)
+                    committed.append(path)
+            except OSError as exc:
+                for path in committed:
+                    rollback = path.with_name(
+                        f".{path.name}.rollback-{uuid4().hex}.tmp"
+                    )
+                    rollback.write_bytes(originals[path])
+                    rollback.replace(path)
+                raise ToolExecutionError("AtomicWriteFailed", str(exc)) from exc
+            finally:
+                for temporary in staged.values():
+                    temporary.unlink(missing_ok=True)
+
+            revisions = {}
+            for path, updated in updated_text.items():
+                revision = self.paths.remember_revision(path, updated.encode("utf-8"))
+                revisions[relative_names[path]] = revision.public()
+
+        return ToolResult.ok(
+            f"Updated {len(updated_text)} file(s) atomically",
+            files=list(relative_names.values()),
+            replacements=sum(replacements.values()),
+            revisions=revisions,
         )

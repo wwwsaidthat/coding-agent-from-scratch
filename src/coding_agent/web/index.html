@@ -33,16 +33,37 @@
     </header>
 
     <main class="app-shell">
+      <aside class="session-sidebar" aria-labelledby="sessions-title">
+        <header class="sidebar-header">
+          <div>
+            <small>WORKSPACES</small>
+            <h2 id="sessions-title">会话</h2>
+          </div>
+          <span id="session-count">00</span>
+        </header>
+        <button class="new-session-button" type="button" id="new-session-button">
+          <span aria-hidden="true">＋</span>
+          <b>新建会话</b>
+        </button>
+        <nav class="session-list" id="session-list" aria-label="历史会话">
+          <p class="session-list-empty" id="session-list-empty">还没有本地会话</p>
+        </nav>
+        <footer class="sidebar-footer">
+          <span aria-hidden="true">⌂</span>
+          <p><strong>会话绑定工作区</strong><br>切换会话时，Agent 的上下文和可访问文件夹会一同切换。</p>
+        </footer>
+      </aside>
+
       <section class="composer-panel" aria-labelledby="composer-title">
-        <div class="eyebrow"><span>01</span> MISSION CONTROL</div>
+        <div class="eyebrow"><span>02</span> MISSION CONTROL</div>
         <h1 id="composer-title">让模型真正<br><em>动手写代码。</em></h1>
         <p class="lead">
-          输入一个编程任务。LoopCoder 会理解项目、调用本地工具、修改文件并运行验证。
+          在同一会话中持续与 Agent 协作。它会记住之前的目标、工具结果和修改内容。
         </p>
 
-        <form id="run-form" novalidate>
+        <section class="workspace-control" aria-labelledby="workspace-title">
           <label class="field-label" for="workspace-input">
-            <span>工作区</span>
+            <span id="workspace-title">工作区</span>
             <small>Agent 只能访问这个文件夹</small>
           </label>
           <div class="path-field">
@@ -56,11 +77,36 @@
               aria-describedby="workspace-hint"
             >
           </div>
-          <p class="field-hint" id="workspace-hint">支持绝对路径，或相对于当前项目的路径。</p>
+          <p class="field-hint" id="workspace-hint">建立会话后会锁定此工作区；新建会话即可切换。</p>
+
+        </section>
+
+        <form id="run-form" novalidate>
+          <section class="context-meter context-card" aria-label="上下文使用情况">
+            <div>
+              <span>CONTEXT MEMORY</span>
+              <strong id="context-percent">0%</strong>
+            </div>
+            <i><b id="context-fill"></b></i>
+            <small id="context-detail">尚未开始会话</small>
+          </section>
+
+          <section class="conversation-memory" aria-labelledby="conversation-memory-title">
+            <header>
+              <div>
+                <small>CONVERSATION MEMORY</small>
+                <h3 id="conversation-memory-title">当前会话 · 点击消息查看对应轨迹</h3>
+              </div>
+              <span id="turn-count">0 TURNS</span>
+            </header>
+            <div class="chat-messages" id="chat-messages" aria-live="polite">
+              <p class="chat-empty" id="chat-empty">新建会话后，你和 Agent 的每轮消息都会保存在本地。</p>
+            </div>
+          </section>
 
           <label class="field-label prompt-label" for="prompt-input">
-            <span>Prompt</span>
-            <small><kbd>⌘</kbd> / <kbd>Ctrl</kbd> + <kbd>Enter</kbd> 运行</small>
+            <span>对话消息</span>
+            <small><kbd>⌘</kbd> / <kbd>Ctrl</kbd> + <kbd>Enter</kbd> 发送</small>
           </label>
           <div class="prompt-wrap">
             <textarea
@@ -68,7 +114,7 @@
               name="task"
               rows="9"
               maxlength="20000"
-              placeholder="例如：阅读当前项目，修复所有失败的测试；只修改必要代码，完成后运行测试并总结修改。"
+              placeholder="首轮可描述完整任务；后续可直接追问，例如：继续修复刚才没有通过的边界测试。"
               required
             ></textarea>
             <div class="prompt-footer">
@@ -77,10 +123,20 @@
             </div>
           </div>
 
+          <div class="attachment-bar">
+            <label class="image-picker" for="image-input">
+              <span aria-hidden="true">▧</span> 添加图片
+            </label>
+            <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+            <span class="vision-state" id="vision-state">视觉模型未检查</span>
+          </div>
+          <div class="pending-images" id="pending-images" aria-live="polite"></div>
+
           <div class="prompt-presets" aria-label="Prompt 示例">
             <button type="button" class="preset" data-prompt="请阅读当前项目，修复所有失败的测试；只修改必要代码，完成后运行全部测试并总结修改。">修复失败测试</button>
             <button type="button" class="preset" data-prompt="请分析当前项目结构，找出潜在的错误处理问题并修复；完成后运行相关测试。">检查错误处理</button>
             <button type="button" class="preset" data-prompt="请只检查当前项目结构并说明主要模块，不要修改任何文件，也不要运行命令。">只读分析项目</button>
+            <button type="button" class="preset" data-prompt="请联网搜索这个问题的最新可靠资料，列出来源并说明检索日期：">联网检索资料</button>
           </div>
 
           <details class="advanced-panel">
@@ -109,7 +165,7 @@
 
           <div class="run-actions">
             <button class="run-button" id="run-button" type="submit">
-              <span class="button-label">启动 Agent</span>
+              <span class="button-label">开始会话</span>
               <span class="button-arrow" aria-hidden="true">↗</span>
             </button>
             <button class="stop-button" id="stop-button" type="button" hidden>
@@ -127,13 +183,25 @@
       <section class="activity-panel" aria-labelledby="activity-title">
         <div class="activity-header">
           <div>
-            <div class="eyebrow light"><span>02</span> EXECUTION TRACE</div>
-            <h2 id="activity-title">Agent 运行轨迹</h2>
+            <div class="eyebrow light"><span>03</span> EXECUTION TRACE</div>
+            <h2 id="activity-title">执行路径与确认</h2>
           </div>
           <div class="status-pill idle" id="run-status">
             <span></span><b>等待任务</b>
           </div>
         </div>
+
+        <section class="run-plan" id="run-plan" hidden aria-labelledby="run-plan-title">
+          <header>
+            <div>
+              <small>COMPLEX TASK PLAN</small>
+              <h3 id="run-plan-title">执行计划</h3>
+            </div>
+            <span id="plan-progress">0 / 0</span>
+          </header>
+          <p id="plan-explanation" hidden></p>
+          <ol id="plan-items"></ol>
+        </section>
 
         <div class="metrics" aria-label="任务运行统计">
           <article>
@@ -151,9 +219,31 @@
             <strong id="metric-time">00:00</strong>
             <span>本次运行时长</span>
           </article>
+          <article>
+            <small>TOKENS</small>
+            <strong id="metric-tokens">00</strong>
+            <span>本次模型用量</span>
+          </article>
         </div>
 
+        <section class="approval-card" id="approval-card" hidden aria-live="assertive">
+          <header>
+            <div>
+              <small>REVIEW REQUIRED</small>
+              <h3 id="approval-title">确认本轮代码修改</h3>
+            </div>
+            <span id="approval-tool">EDIT</span>
+          </header>
+          <p id="approval-description">代码尚未写入工作区。请检查下面的红色删除行与绿色新增行。</p>
+          <div class="approval-diffs" id="approval-diffs"></div>
+          <div class="approval-actions">
+            <button type="button" class="reject-edit" id="reject-edit">拒绝操作</button>
+            <button type="button" class="approve-edit" id="approve-edit">同意并继续</button>
+          </div>
+        </section>
+
         <div class="trace-viewport" id="trace-viewport">
+          <div class="selected-turn-label" id="selected-turn-label">尚未选择对话轮次</div>
           <div class="empty-state" id="empty-state">
             <div class="loop-diagram" aria-hidden="true">
               <div class="diagram-node node-model"><span>MODEL</span></div>
@@ -163,19 +253,16 @@
               <div class="diagram-node node-result"><span>RESULT</span></div>
             </div>
             <h3>执行轨迹将在这里展开</h3>
-            <p>每次模型决策、工具参数、本地结果和最终回答都会按时间顺序显示。</p>
+            <p>每一轮都会展示 Thought 决策摘要、Action 真实参数与 Observation 返回内容。</p>
           </div>
 
           <ol class="timeline" id="timeline" aria-live="polite"></ol>
 
-          <article class="result-card" id="result-card" hidden>
-            <header>
-              <span class="result-check" aria-hidden="true">✓</span>
-              <div><small>FINAL RESPONSE</small><h3>任务结果</h3></div>
-              <button type="button" id="copy-result">复制结果</button>
-            </header>
-            <pre id="result-output"></pre>
-          </article>
+          <div class="final-test execution-test" id="final-test" hidden>
+            <span>FINAL TEST</span>
+            <strong id="final-test-status">—</strong>
+            <code id="final-test-command"></code>
+          </div>
         </div>
 
         <footer class="activity-footer">

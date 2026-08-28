@@ -84,7 +84,7 @@ class DeepSeekChatModel:
                 "Authorization": f"Bearer {self.settings.api_key}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "coding-agent-from-scratch/0.1.0",
+                "User-Agent": "coding-agent-from-scratch/0.4.0",
             },
         )
 
@@ -163,8 +163,15 @@ class ScriptedDemoModel:
             return ModelResponse(
                 content=None,
                 tool_calls=(
+                    ToolCall("demo-2", "read_file", '{"path":"agent_demo.txt"}'),
+                ),
+            )
+        if self.turn == 3:
+            return ModelResponse(
+                content=None,
+                tool_calls=(
                     ToolCall(
-                        "demo-2",
+                        "demo-3",
                         "write_file",
                         json.dumps(
                             {
@@ -176,11 +183,11 @@ class ScriptedDemoModel:
                     ),
                 ),
             )
-        if self.turn == 3:
+        if self.turn == 4:
             return ModelResponse(
                 content=None,
                 tool_calls=(
-                    ToolCall("demo-3", "read_file", '{"path":"agent_demo.txt"}'),
+                    ToolCall("demo-4", "read_file", '{"path":"agent_demo.txt"}'),
                 ),
             )
         return ModelResponse(

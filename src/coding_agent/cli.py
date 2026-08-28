@@ -9,16 +9,26 @@ from typing import Any, Mapping, Sequence
 
 from .agent import Agent, AgentError
 from .config import Settings, load_env_file
+from .conversation import Conversation
 from .models import DeepSeekChatModel, ModelAPIError, ScriptedDemoModel
+from .prompts import system_prompt_for_models
 from .tools import (
+    AnalyzeImageTool,
+    FindFilesTool,
     ListFilesTool,
+    MultiEditTool,
+    QwenChatClient,
     ReadFileTool,
     ReplaceInFileTool,
     RunCommandTool,
+    SearchCodeTool,
     ToolRegistry,
+    UpdatePlanTool,
     WriteFileTool,
+    WebSearchTool,
 )
-from .tools.filesystem import WorkspacePaths
+from .tools.filesystem import ApprovalHandler, WorkspacePaths
+from .tools.planning import PlanHandler
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,17 +77,56 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_registry(workspace: Path, command_timeout: int) -> ToolRegistry:
+def build_registry(
+    workspace: Path,
+    command_timeout: int,
+    approval_handler: ApprovalHandler | None = None,
+    settings: Settings | None = None,
+    plan_handler: PlanHandler | None = None,
+) -> ToolRegistry:
     paths = WorkspacePaths(workspace)
-    return ToolRegistry(
-        [
-            ListFilesTool(paths),
-            ReadFileTool(paths),
-            WriteFileTool(paths),
-            ReplaceInFileTool(paths),
-            RunCommandTool(paths, default_timeout=command_timeout),
-        ]
-    )
+    tools = [
+        FindFilesTool(paths),
+        SearchCodeTool(paths),
+        ListFilesTool(paths),
+        ReadFileTool(paths),
+        WriteFileTool(paths, approval_handler),
+        ReplaceInFileTool(paths, approval_handler),
+        MultiEditTool(paths, approval_handler),
+        RunCommandTool(paths, default_timeout=command_timeout),
+    ]
+    if plan_handler is not None:
+        tools.append(UpdatePlanTool(plan_handler))
+    if settings is not None:
+        external = QwenChatClient(settings)
+        tools.extend(
+            [
+                WebSearchTool(external, approval_handler),
+                AnalyzeImageTool(paths, external, approval_handler),
+            ]
+        )
+    return ToolRegistry(tools)
+
+
+def terminal_approval(proposal: Mapping[str, Any]) -> bool:
+    """Ask a terminal user before edits or transfers to external services."""
+    if not sys.stdin.isatty():
+        return False
+    print("\nApproval required:")
+    print(str(proposal.get("title") or proposal.get("tool") or "Agent action"))
+    if proposal.get("summary"):
+        print(str(proposal["summary"]))
+    details = proposal.get("details")
+    if isinstance(details, Mapping):
+        for name, value in details.items():
+            print(f"  {name}: {value}")
+    files = proposal.get("files")
+    if isinstance(files, list):
+        for file in files:
+            if isinstance(file, Mapping):
+                print(str(file.get("diff") or file.get("path") or ""))
+    answer = input("Allow this action? [y/N] ").strip().lower()
+    return answer in {"y", "yes"}
 
 
 def event_printer(event: str, payload: Mapping[str, Any]) -> None:
@@ -111,7 +160,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 port=args.port,
                 default_workspace=workspace,
             )
-        registry = build_registry(workspace, settings.command_timeout)
+        registry = build_registry(
+            workspace,
+            settings.command_timeout,
+            approval_handler=None if args.demo else terminal_approval,
+            settings=settings,
+        )
         model = ScriptedDemoModel() if args.demo else DeepSeekChatModel(settings)
 
         task = " ".join(args.task).strip()
@@ -129,7 +183,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_steps=settings.max_steps,
             on_event=None if args.quiet else event_printer,
         )
-        result = agent.run(task)
+        primary_identity = "offline scripted demo" if args.demo else settings.model
+        conversation = Conversation(
+            system_prompt_for_models(primary_identity, settings.qwen_model)
+        )
+        result = agent.run(task, conversation=conversation)
         print("\nResult:\n" + result.final_output)
         print(
             f"\nCompleted in {result.steps} model step(s) and "
