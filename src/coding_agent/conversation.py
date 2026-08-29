@@ -3,7 +3,81 @@
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
+
+
+@dataclass(slots=True)
+class MemoryCheckpoint:
+    """Bounded, structured task memory kept independently of chat history."""
+
+    goal: str = ""
+    constraints: list[str] = field(default_factory=list)
+    completed: list[str] = field(default_factory=list)
+    decisions: list[str] = field(default_factory=list)
+    modified_files: list[str] = field(default_factory=list)
+    tests: list[str] = field(default_factory=list)
+    failed_attempts: list[str] = field(default_factory=list)
+    do_not_repeat: list[str] = field(default_factory=list)
+    next_steps: list[str] = field(default_factory=list)
+
+    _LIST_FIELDS = (
+        "constraints",
+        "completed",
+        "decisions",
+        "modified_files",
+        "tests",
+        "failed_attempts",
+        "do_not_repeat",
+        "next_steps",
+    )
+    _MAX_ITEMS = 24
+    _MAX_ITEM_CHARS = 600
+
+    def remember(self, field_name: str, value: Any) -> None:
+        if field_name not in self._LIST_FIELDS:
+            raise ValueError(f"Unknown memory field: {field_name}")
+        text = " ".join(str(value or "").split())
+        if not text:
+            return
+        text = text[: self._MAX_ITEM_CHARS]
+        items: list[str] = getattr(self, field_name)
+        if text in items:
+            return
+        items.append(text)
+        if len(items) > self._MAX_ITEMS:
+            del items[: len(items) - self._MAX_ITEMS]
+
+    def replace(self, field_name: str, values: Sequence[Any]) -> None:
+        if field_name not in self._LIST_FIELDS:
+            raise ValueError(f"Unknown memory field: {field_name}")
+        setattr(self, field_name, [])
+        for value in values:
+            self.remember(field_name, value)
+
+    def to_state(self) -> dict[str, Any]:
+        return {
+            "goal": self.goal,
+            **{name: list(getattr(self, name)) for name in self._LIST_FIELDS},
+        }
+
+    @classmethod
+    def from_state(cls, state: Any) -> "MemoryCheckpoint":
+        checkpoint = cls()
+        if not isinstance(state, Mapping):
+            return checkpoint
+        goal = state.get("goal", "")
+        if isinstance(goal, str):
+            checkpoint.goal = goal[:2_000]
+        for field_name in cls._LIST_FIELDS:
+            values = state.get(field_name, [])
+            if isinstance(values, list):
+                checkpoint.replace(field_name, values)
+        return checkpoint
+
+    def render(self) -> str:
+        return json.dumps(self.to_state(), ensure_ascii=False, indent=2)
 
 
 class Conversation:
@@ -23,6 +97,7 @@ class Conversation:
         self._project_rules = project_rules.strip()[:20_000]
         self._exchanges: list[list[dict[str, Any]]] = []
         self._active = False
+        self._checkpoint = MemoryCheckpoint()
         self.max_context_chars = max_context_chars
         if user_task is not None:
             self.start_user_turn(user_task)
@@ -34,6 +109,9 @@ class Conversation:
         if not content:
             raise ValueError("User message must not be empty")
         self._exchanges.append([{"role": "user", "content": content}])
+        self._checkpoint.goal = self._message_text(content, 2_000)
+        for constraint in self._extract_constraints(content):
+            self._checkpoint.remember("constraints", constraint)
         self._active = True
 
     def add_tool_turn(
@@ -45,10 +123,14 @@ class Conversation:
         self._exchanges[-1].extend(
             [dict(assistant_message), *(dict(message) for message in tool_messages)]
         )
+        self._update_checkpoint_from_tools(assistant_message, tool_messages)
 
     def add_final(self, content: str) -> None:
         self._require_active()
         self._exchanges[-1].append({"role": "assistant", "content": content})
+        self._checkpoint.remember(
+            "completed", "Outcome: " + self._message_text(content, 560)
+        )
         self._active = False
 
     def abort_turn(self, content: str) -> None:
@@ -107,7 +189,16 @@ class Conversation:
             "retained_exchanges": len(retained),
             "dropped_exchanges": dropped,
             "project_rules_chars": len(self._project_rules),
+            "memory_checkpoint_chars": len(self._checkpoint.render()),
+            "memory_checkpoint_items": sum(
+                len(getattr(self._checkpoint, name))
+                for name in MemoryCheckpoint._LIST_FIELDS
+            ),
         }
+
+    def memory_checkpoint(self) -> dict[str, Any]:
+        """Return a detached public snapshot for persistence and user interfaces."""
+        return self._checkpoint.to_state()
 
     def to_state(self) -> dict[str, Any]:
         return {
@@ -116,6 +207,7 @@ class Conversation:
             "max_context_chars": self.max_context_chars,
             "exchanges": self._exchanges,
             "active": self._active,
+            "memory_checkpoint": self._checkpoint.to_state(),
         }
 
     @classmethod
@@ -155,6 +247,9 @@ class Conversation:
             normalized.append(normalized_exchange)
         conversation._exchanges = normalized
         conversation._active = bool(active)
+        conversation._checkpoint = MemoryCheckpoint.from_state(
+            state.get("memory_checkpoint")
+        )
         return conversation
 
     def _retained_exchanges(self) -> tuple[list[list[dict[str, Any]]], int]:
@@ -184,6 +279,20 @@ class Conversation:
                     "role": "system",
                     "content": "Project rules (higher priority than task preferences):\n"
                     + self._project_rules,
+                }
+            )
+        checkpoint = self._checkpoint.to_state()
+        if checkpoint["goal"] or any(
+            checkpoint[name] for name in MemoryCheckpoint._LIST_FIELDS
+        ):
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Structured task memory checkpoint. Treat it as a factual, "
+                        "persistent status record; verify file details before editing:\n"
+                        + self._checkpoint.render()
+                    ),
                 }
             )
         summary = self._completed_task_summary()
@@ -240,6 +349,120 @@ class Conversation:
     def _require_active(self) -> None:
         if not self._active or not self._exchanges:
             raise ValueError("No active user turn")
+
+    @classmethod
+    def _extract_constraints(cls, content: str) -> list[str]:
+        markers = re.compile(
+            r"(必须|不要|不能|不许|只允许|需要|每次|务必|禁止|must\b|should\b|"
+            r"do not\b|don't\b|never\b|only\b)",
+            re.IGNORECASE,
+        )
+        parts = re.split(r"[\n。！？!?；;]+", content)
+        return [cls._message_text(part, 500) for part in parts if markers.search(part)][:8]
+
+    def _update_checkpoint_from_tools(
+        self,
+        assistant_message: Mapping[str, Any],
+        tool_messages: Sequence[Mapping[str, Any]],
+    ) -> None:
+        calls = {
+            str(call.get("id")): call
+            for call in assistant_message.get("tool_calls", [])
+            if isinstance(call, Mapping) and call.get("id")
+        }
+        for message in tool_messages:
+            call = calls.get(str(message.get("tool_call_id")))
+            if not call:
+                continue
+            function = call.get("function")
+            if not isinstance(function, Mapping):
+                continue
+            name = str(function.get("name") or "unknown_tool")
+            arguments = self._json_mapping(function.get("arguments"))
+            result = self._json_mapping(message.get("content"))
+            success = result.get("success") is True
+            if name == "run_command":
+                argv = arguments.get("argv")
+                if isinstance(argv, list) and self._looks_like_test(argv):
+                    command = " ".join(str(part) for part in argv)
+                    metadata = result.get("metadata")
+                    exit_code = (
+                        metadata.get("exit_code")
+                        if isinstance(metadata, Mapping)
+                        else None
+                    )
+                    status = "passed" if success else "failed"
+                    self._checkpoint.remember(
+                        "tests", f"{command} ({status}, exit_code={exit_code})"
+                    )
+            if not success:
+                error = self._message_text(result.get("error"), 400) or "unknown error"
+                failure = f"{name}: {error}"
+                self._checkpoint.remember("failed_attempts", failure)
+                metadata = result.get("metadata")
+                code = metadata.get("code") if isinstance(metadata, Mapping) else None
+                if code in {"Conflict", "RepeatedToolCall", "ApprovalRejected"}:
+                    self._checkpoint.remember("do_not_repeat", failure)
+                continue
+
+            if name in {"write_file", "replace_in_file"}:
+                self._remember_modified_path(arguments.get("path"))
+                self._checkpoint.remember(
+                    "decisions", f"Applied {name} to {arguments.get('path')}"
+                )
+            elif name == "multi_edit":
+                edits = arguments.get("edits")
+                if isinstance(edits, list):
+                    for edit in edits:
+                        if isinstance(edit, Mapping):
+                            self._remember_modified_path(edit.get("path"))
+                self._checkpoint.remember(
+                    "decisions", "Applied one atomic multi-file edit"
+                )
+            elif name == "update_plan":
+                data = result.get("data")
+                if isinstance(data, Mapping) and data.get("explanation"):
+                    self._checkpoint.remember("decisions", data.get("explanation"))
+                plan = data.get("plan") if isinstance(data, Mapping) else None
+                if isinstance(plan, list):
+                    completed: list[str] = []
+                    next_steps: list[str] = []
+                    for item in plan:
+                        if not isinstance(item, Mapping):
+                            continue
+                        step = self._message_text(item.get("step"), 500)
+                        if not step:
+                            continue
+                        if item.get("status") == "completed":
+                            completed.append(step)
+                        else:
+                            next_steps.append(step)
+                    self._checkpoint.replace("completed", completed)
+                    self._checkpoint.replace("next_steps", next_steps)
+
+    def _remember_modified_path(self, path: Any) -> None:
+        if isinstance(path, str) and path.strip():
+            self._checkpoint.remember("modified_files", path.strip())
+
+    @staticmethod
+    def _json_mapping(value: Any) -> Mapping[str, Any]:
+        if isinstance(value, Mapping):
+            return value
+        if not isinstance(value, str):
+            return {}
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, Mapping) else {}
+
+    @staticmethod
+    def _looks_like_test(argv: Sequence[Any]) -> bool:
+        command = " ".join(str(part).lower() for part in argv)
+        return any(
+            marker in command
+            for marker in ("pytest", "unittest", "npm test", "npm run test", "cargo test", "go test")
+        )
 
     @staticmethod
     def _size(

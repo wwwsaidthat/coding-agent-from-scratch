@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import sys
 import unittest
 
@@ -47,6 +48,25 @@ class ModelParsingTests(unittest.TestCase):
 
 
 class ConversationTests(unittest.TestCase):
+    @staticmethod
+    def _tool_call(call_id: str, name: str, arguments: dict) -> dict:
+        return {
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": json.dumps(arguments, ensure_ascii=False),
+            },
+        }
+
+    @staticmethod
+    def _tool_message(call_id: str, payload: dict) -> dict:
+        return {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": json.dumps(payload, ensure_ascii=False),
+        }
+
     def test_runtime_model_identity_is_authoritative_and_refreshable(self) -> None:
         prompt = system_prompt_for_models("deepseek-v4-pro", "qwen3.6-flash")
         conversation = Conversation("old prompt")
@@ -131,6 +151,125 @@ class ConversationTests(unittest.TestCase):
         ]
         self.assertEqual(len(project_layers), 1)
         self.assertFalse(restored.has_active_turn)
+
+    def test_structured_checkpoint_tracks_task_edits_plan_and_tests(self) -> None:
+        conversation = Conversation("system")
+        conversation.start_user_turn(
+            "请修改登录逻辑。必须先读文件，每次修改后需要运行测试。"
+        )
+        calls = [
+            self._tool_call(
+                "edit-1",
+                "replace_in_file",
+                {"path": "src/login.py", "old_text": "old", "new_text": "new"},
+            ),
+            self._tool_call(
+                "plan-1",
+                "update_plan",
+                {
+                    "explanation": "登录修复完成后验证回归测试",
+                    "plan": [
+                        {"step": "修复登录逻辑", "status": "completed"},
+                        {"step": "运行完整测试", "status": "in_progress"},
+                    ],
+                },
+            ),
+            self._tool_call(
+                "test-1",
+                "run_command",
+                {"argv": ["python3", "-m", "unittest"]},
+            ),
+        ]
+        conversation.add_tool_turn(
+            {"role": "assistant", "content": None, "tool_calls": calls},
+            [
+                self._tool_message(
+                    "edit-1",
+                    {"success": True, "data": "Updated src/login.py"},
+                ),
+                self._tool_message(
+                    "plan-1",
+                    {
+                        "success": True,
+                        "data": {
+                            "explanation": "登录修复完成后验证回归测试",
+                            "plan": [
+                                {"step": "修复登录逻辑", "status": "completed"},
+                                {"step": "运行完整测试", "status": "in_progress"},
+                            ],
+                        },
+                    },
+                ),
+                self._tool_message(
+                    "test-1",
+                    {
+                        "success": True,
+                        "data": "OK",
+                        "metadata": {"exit_code": 0},
+                    },
+                ),
+            ],
+        )
+        conversation.add_final("登录逻辑已修复，测试通过。")
+
+        memory = conversation.memory_checkpoint()
+        self.assertIn("登录逻辑", memory["goal"])
+        self.assertTrue(any("必须先读文件" in item for item in memory["constraints"]))
+        self.assertIn("src/login.py", memory["modified_files"])
+        self.assertIn("修复登录逻辑", memory["completed"])
+        self.assertIn("运行完整测试", memory["next_steps"])
+        self.assertTrue(any("passed" in item for item in memory["tests"]))
+        self.assertIn("登录修复完成后验证回归测试", memory["decisions"])
+        checkpoint_layers = [
+            message["content"]
+            for message in conversation.api_messages()
+            if message.get("role") == "system"
+            and "Structured task memory checkpoint" in message["content"]
+        ]
+        self.assertEqual(len(checkpoint_layers), 1)
+        self.assertIn("src/login.py", checkpoint_layers[0])
+
+    def test_checkpoint_records_failures_and_survives_round_trip(self) -> None:
+        conversation = Conversation("system")
+        conversation.start_user_turn("修改 app.py")
+        call = self._tool_call(
+            "edit-1",
+            "replace_in_file",
+            {"path": "app.py", "old_text": "a", "new_text": "b"},
+        )
+        conversation.add_tool_turn(
+            {"role": "assistant", "content": None, "tool_calls": [call]},
+            [
+                self._tool_message(
+                    "edit-1",
+                    {
+                        "success": False,
+                        "error": "File changed after it was read",
+                        "metadata": {"code": "Conflict"},
+                    },
+                )
+            ],
+        )
+        conversation.add_final("检测到文件冲突，未修改。")
+
+        restored = Conversation.from_state(conversation.to_state())
+        self.assertEqual(restored.memory_checkpoint(), conversation.memory_checkpoint())
+        self.assertTrue(restored.memory_checkpoint()["failed_attempts"])
+        self.assertTrue(restored.memory_checkpoint()["do_not_repeat"])
+        self.assertGreater(restored.context_stats()["memory_checkpoint_items"], 0)
+
+    def test_old_conversation_state_migrates_with_empty_checkpoint(self) -> None:
+        legacy = {
+            "system_prompt": "system",
+            "project_rules": "",
+            "max_context_chars": 2_000,
+            "exchanges": [[{"role": "user", "content": "old request"}, {"role": "assistant", "content": "done"}]],
+            "active": False,
+        }
+        restored = Conversation.from_state(legacy)
+        memory = restored.memory_checkpoint()
+        self.assertEqual(memory["goal"], "")
+        self.assertTrue(all(not value for key, value in memory.items() if key != "goal"))
 
 
 if __name__ == "__main__":
