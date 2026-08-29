@@ -160,6 +160,7 @@ class RunStore:
             max_steps=max_steps,
             conversation=Conversation(
                 self._system_prompt(),
+                max_context_tokens=self.settings.context_tokens,
                 project_rules=_load_project_rules(workspace),
             ),
         )
@@ -537,6 +538,7 @@ class RunStore:
                 model,
                 registry,
                 max_steps=record.max_steps,
+                max_context_tokens=self.settings.context_tokens,
                 on_event=on_event,
                 should_stop=record.cancel_event.is_set,
             )
@@ -853,7 +855,7 @@ class LocalWebApplication:
             "reasoning_effort": self.settings.reasoning_effort,
             "default_workspace": str(self.default_workspace),
             "max_steps": self.settings.max_steps,
-            "context_budget_chars": 120_000,
+            "context_budget_tokens": self.settings.context_tokens,
             "vision_configured": bool(self.settings.qwen_api_key),
             "vision_model": self.settings.qwen_model,
             "web_search_configured": bool(self.settings.qwen_api_key),

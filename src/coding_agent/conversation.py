@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
@@ -80,6 +81,56 @@ class MemoryCheckpoint:
         return json.dumps(self.to_state(), ensure_ascii=False, indent=2)
 
 
+@dataclass(slots=True)
+class TokenCalibration:
+    """Calibrate a local token estimate against provider-reported prompt usage."""
+
+    factor: float = 1.0
+    samples: int = 0
+    last_prompt_tokens: int = 0
+
+    def observe(self, raw_estimate: int, actual_prompt_tokens: int) -> None:
+        if raw_estimate <= 0 or actual_prompt_tokens <= 0:
+            return
+        sample = min(4.0, max(0.5, actual_prompt_tokens / raw_estimate))
+        self.factor = sample if not self.samples else self.factor * 0.7 + sample * 0.3
+        self.samples += 1
+        self.last_prompt_tokens = actual_prompt_tokens
+
+    def apply(self, raw_estimate: int) -> int:
+        return max(1, math.ceil(raw_estimate * self.factor))
+
+    def to_state(self) -> dict[str, Any]:
+        return {
+            "factor": round(self.factor, 6),
+            "samples": self.samples,
+            "last_prompt_tokens": self.last_prompt_tokens,
+        }
+
+    @classmethod
+    def from_state(cls, state: Any) -> "TokenCalibration":
+        if not isinstance(state, Mapping):
+            return cls()
+        factor = state.get("factor", 1.0)
+        samples = state.get("samples", 0)
+        last_prompt_tokens = state.get("last_prompt_tokens", 0)
+        if not isinstance(factor, (int, float)) or isinstance(factor, bool):
+            factor = 1.0
+        if not isinstance(samples, int) or isinstance(samples, bool) or samples < 0:
+            samples = 0
+        if (
+            not isinstance(last_prompt_tokens, int)
+            or isinstance(last_prompt_tokens, bool)
+            or last_prompt_tokens < 0
+        ):
+            last_prompt_tokens = 0
+        return cls(
+            factor=min(4.0, max(0.5, float(factor))),
+            samples=samples,
+            last_prompt_tokens=last_prompt_tokens,
+        )
+
+
 class Conversation:
     """Store complete user exchanges while enforcing a simple context budget."""
 
@@ -89,16 +140,26 @@ class Conversation:
         user_task: str | None = None,
         *,
         max_context_chars: int = 120_000,
+        max_context_tokens: int = 64_000,
+        response_reserve_tokens: int = 8_000,
         project_rules: str = "",
     ) -> None:
         if max_context_chars <= 0:
             raise ValueError("max_context_chars must be greater than zero")
+        if max_context_tokens <= 0:
+            raise ValueError("max_context_tokens must be greater than zero")
+        if not 0 <= response_reserve_tokens < max_context_tokens:
+            raise ValueError("response_reserve_tokens must be below max_context_tokens")
         self._system_prompt = system_prompt
         self._project_rules = project_rules.strip()[:20_000]
         self._exchanges: list[list[dict[str, Any]]] = []
         self._active = False
         self._checkpoint = MemoryCheckpoint()
+        self._token_calibration = TokenCalibration()
+        self._tool_definitions: list[dict[str, Any]] = []
         self.max_context_chars = max_context_chars
+        self.max_context_tokens = max_context_tokens
+        self.response_reserve_tokens = response_reserve_tokens
         if user_task is not None:
             self.start_user_turn(user_task)
 
@@ -150,6 +211,30 @@ class Conversation:
             raise ValueError("System prompt must not be empty")
         self._system_prompt = system_prompt
 
+    def set_tool_definitions(
+        self, tool_definitions: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Reserve prompt capacity for the tool schemas sent beside messages."""
+        self._tool_definitions = [dict(definition) for definition in tool_definitions]
+
+    def observe_usage(
+        self,
+        request_messages: Sequence[Mapping[str, Any]],
+        usage: Any,
+    ) -> None:
+        """Learn from provider usage without depending on a provider tokenizer."""
+        if not isinstance(usage, Mapping):
+            return
+        prompt_tokens = usage.get("prompt_tokens")
+        if (
+            isinstance(prompt_tokens, bool)
+            or not isinstance(prompt_tokens, int)
+            or prompt_tokens <= 0
+        ):
+            return
+        raw = self._raw_token_estimate([*request_messages, *self._tool_definitions])
+        self._token_calibration.observe(raw, prompt_tokens)
+
     def api_messages(self) -> list[dict[str, Any]]:
         retained, dropped = self._retained_exchanges()
         messages = self._layer_messages()
@@ -176,15 +261,24 @@ class Conversation:
             messages.extend(exchange)
         return messages
 
-    def context_stats(self) -> dict[str, int]:
+    def context_stats(self) -> dict[str, Any]:
         retained, dropped = self._retained_exchanges()
         used = self._size(self._layer_messages(), retained)
         if dropped:
             used += len(self._memory_summary(self._exchanges[:dropped]))
+        estimated_tokens = self._request_token_estimate(retained, dropped)
+        prompt_budget = self._prompt_token_budget()
         return {
             "used_chars": used,
             "budget_chars": self.max_context_chars,
-            "percent": min(100, round(used * 100 / self.max_context_chars)),
+            "estimated_tokens": estimated_tokens,
+            "budget_tokens": prompt_budget,
+            "max_context_tokens": self.max_context_tokens,
+            "response_reserve_tokens": self.response_reserve_tokens,
+            "percent": min(100, round(estimated_tokens * 100 / prompt_budget)),
+            "token_calibrated": self._token_calibration.samples > 0,
+            "token_calibration_samples": self._token_calibration.samples,
+            "last_prompt_tokens": self._token_calibration.last_prompt_tokens,
             "total_exchanges": len(self._exchanges),
             "retained_exchanges": len(retained),
             "dropped_exchanges": dropped,
@@ -208,6 +302,9 @@ class Conversation:
             "exchanges": self._exchanges,
             "active": self._active,
             "memory_checkpoint": self._checkpoint.to_state(),
+            "max_context_tokens": self.max_context_tokens,
+            "response_reserve_tokens": self.response_reserve_tokens,
+            "token_calibration": self._token_calibration.to_state(),
         }
 
     @classmethod
@@ -229,6 +326,12 @@ class Conversation:
         conversation = cls(
             system_prompt,
             max_context_chars=max_context_chars,
+            max_context_tokens=cls._state_positive_int(
+                state.get("max_context_tokens"), 64_000
+            ),
+            response_reserve_tokens=cls._state_nonnegative_int(
+                state.get("response_reserve_tokens"), 8_000
+            ),
             project_rules=project_rules,
         )
         normalized: list[list[dict[str, Any]]] = []
@@ -250,6 +353,9 @@ class Conversation:
         conversation._checkpoint = MemoryCheckpoint.from_state(
             state.get("memory_checkpoint")
         )
+        conversation._token_calibration = TokenCalibration.from_state(
+            state.get("token_calibration")
+        )
         return conversation
 
     def _retained_exchanges(self) -> tuple[list[list[dict[str, Any]]], int]:
@@ -257,13 +363,7 @@ class Conversation:
         dropped = 0
         layers = self._layer_messages()
         while len(retained) > 1:
-            memory_size = (
-                len(self._memory_summary(self._exchanges[:dropped])) if dropped else 0
-            )
-            if (
-                self._size(layers, retained) + memory_size
-                <= self.max_context_chars
-            ):
+            if self._request_token_estimate(retained, dropped, layers) <= self._prompt_token_budget():
                 break
             retained.pop(0)
             dropped += 1
@@ -463,6 +563,57 @@ class Conversation:
             marker in command
             for marker in ("pytest", "unittest", "npm test", "npm run test", "cargo test", "go test")
         )
+
+    def _prompt_token_budget(self) -> int:
+        safety_margin = max(32, math.ceil(self.max_context_tokens * 0.03))
+        return max(
+            1,
+            self.max_context_tokens - self.response_reserve_tokens - safety_margin,
+        )
+
+    def _request_token_estimate(
+        self,
+        retained: Sequence[Sequence[Mapping[str, Any]]],
+        dropped: int,
+        layers: Sequence[Mapping[str, Any]] | None = None,
+    ) -> int:
+        messages: list[Mapping[str, Any]] = list(layers or self._layer_messages())
+        if dropped:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": self._memory_summary(self._exchanges[:dropped]),
+                }
+            )
+        for exchange in retained:
+            messages.extend(exchange)
+        raw = self._raw_token_estimate([*messages, *self._tool_definitions])
+        return self._token_calibration.apply(raw)
+
+    @classmethod
+    def _raw_token_estimate(cls, values: Sequence[Mapping[str, Any]]) -> int:
+        serialized = json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+        cjk = sum(
+            1
+            for character in serialized
+            if "\u3400" <= character <= "\u9fff"
+            or "\uf900" <= character <= "\ufaff"
+        )
+        other = len(serialized) - cjk
+        structural_overhead = len(values) * 4 + 2
+        return max(1, cjk + math.ceil(other / 4) + structural_overhead)
+
+    @staticmethod
+    def _state_positive_int(value: Any, default: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return default
+        return value
+
+    @staticmethod
+    def _state_nonnegative_int(value: Any, default: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return default
+        return value
 
     @staticmethod
     def _size(

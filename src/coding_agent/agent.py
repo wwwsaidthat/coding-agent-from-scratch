@@ -44,6 +44,7 @@ class Agent:
         *,
         max_steps: int = 20,
         max_context_chars: int = 120_000,
+        max_context_tokens: int = 64_000,
         on_event: EventHandler | None = None,
         should_stop: StopChecker | None = None,
     ) -> None:
@@ -53,6 +54,7 @@ class Agent:
         self.tools = tools
         self.max_steps = max_steps
         self.max_context_chars = max_context_chars
+        self.max_context_tokens = max_context_tokens
         self.on_event = on_event
         self.should_stop = should_stop
 
@@ -64,7 +66,9 @@ class Agent:
             conversation = Conversation(
                 SYSTEM_PROMPT,
                 max_context_chars=self.max_context_chars,
+                max_context_tokens=self.max_context_tokens,
             )
+        conversation.set_tool_definitions(self.tools.definitions)
         conversation.start_user_turn(task)
         tool_call_count = 0
         previous_fingerprint: tuple[str, str] | None = None
@@ -101,6 +105,7 @@ class Agent:
                 )
                 raise
             duration_ms = round((time.perf_counter() - request_started) * 1_000, 2)
+            conversation.observe_usage(request_messages, response.metadata.get("usage"))
             self._emit(
                 "model_response",
                 {

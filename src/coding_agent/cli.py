@@ -181,11 +181,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             model,
             registry,
             max_steps=settings.max_steps,
+            max_context_tokens=settings.context_tokens,
             on_event=None if args.quiet else event_printer,
         )
         primary_identity = "offline scripted demo" if args.demo else settings.model
         conversation = Conversation(
-            system_prompt_for_models(primary_identity, settings.qwen_model)
+            system_prompt_for_models(primary_identity, settings.qwen_model),
+            max_context_tokens=settings.context_tokens,
         )
         result = agent.run(task, conversation=conversation)
         print("\nResult:\n" + result.final_output)

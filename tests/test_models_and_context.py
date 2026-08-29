@@ -78,7 +78,12 @@ class ConversationTests(unittest.TestCase):
         self.assertIn("qwen3.6-flash", system)
 
     def test_context_trimming_keeps_tool_pairs_together(self) -> None:
-        conversation = Conversation("system", max_context_chars=650)
+        conversation = Conversation(
+            "system",
+            max_context_chars=650,
+            max_context_tokens=300,
+            response_reserve_tokens=0,
+        )
         for index in range(4):
             conversation.start_user_turn(f"task {index}")
             conversation.add_tool_turn(
@@ -270,6 +275,34 @@ class ConversationTests(unittest.TestCase):
         memory = restored.memory_checkpoint()
         self.assertEqual(memory["goal"], "")
         self.assertTrue(all(not value for key, value in memory.items() if key != "goal"))
+
+    def test_token_budget_calibrates_from_provider_usage_and_persists(self) -> None:
+        conversation = Conversation(
+            "system",
+            max_context_tokens=2_000,
+            response_reserve_tokens=200,
+        )
+        conversation.set_tool_definitions(
+            [{"type": "function", "function": {"name": "read_file"}}]
+        )
+        conversation.start_user_turn("检查项目并说明结构")
+        request = conversation.api_messages()
+        before = conversation.context_stats()
+        self.assertFalse(before["token_calibrated"])
+        self.assertEqual(before["budget_tokens"], 1_740)
+
+        conversation.observe_usage(request, {"prompt_tokens": 900})
+        after = conversation.context_stats()
+        self.assertTrue(after["token_calibrated"])
+        self.assertEqual(after["token_calibration_samples"], 1)
+        self.assertEqual(after["last_prompt_tokens"], 900)
+        self.assertGreater(after["estimated_tokens"], before["estimated_tokens"])
+
+        restored = Conversation.from_state(conversation.to_state())
+        restored_stats = restored.context_stats()
+        self.assertTrue(restored_stats["token_calibrated"])
+        self.assertEqual(restored_stats["last_prompt_tokens"], 900)
+        self.assertEqual(restored_stats["max_context_tokens"], 2_000)
 
 
 if __name__ == "__main__":

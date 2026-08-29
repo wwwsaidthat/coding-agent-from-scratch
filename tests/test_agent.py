@@ -38,6 +38,15 @@ class ContextRecordingModel:
         return ModelResponse(content="turn complete")
 
 
+class UsageReportingModel:
+    def complete(self, messages, tools):
+        del messages, tools
+        return ModelResponse(
+            content="usage recorded",
+            metadata={"usage": {"prompt_tokens": 321, "completion_tokens": 7}},
+        )
+
+
 class AgentLoopTests(unittest.TestCase):
     def test_offline_model_completes_full_tool_loop(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -113,6 +122,20 @@ class AgentLoopTests(unittest.TestCase):
                     ("user", "continue with the same project"),
                 ],
             )
+
+    def test_agent_calibrates_conversation_from_model_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            conversation = Conversation("system")
+            agent = Agent(
+                UsageReportingModel(),
+                build_registry(Path(temporary), 10),
+            )
+
+            agent.run("record provider usage", conversation=conversation)
+
+            stats = conversation.context_stats()
+            self.assertTrue(stats["token_calibrated"])
+            self.assertEqual(stats["last_prompt_tokens"], 321)
 
     def test_cli_demo_runs_without_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
