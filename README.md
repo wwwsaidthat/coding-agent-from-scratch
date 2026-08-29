@@ -108,13 +108,13 @@ export DEEPSEEK_MODEL="deepseek-v4-pro"
 
 ### 使用 `.env`
 
-项目启动时会自动加载根目录下的 `.env`，且不会覆盖终端中已设置的同名变量。`.env` 已被 Git 忽略，不要提交真实 API Key。
+项目提供了完整的 [`.env.example`](.env.example)。先在项目根目录复制为 `.env`，再填写自己的 API Key 和服务地址：
 
-```dotenv
-DEEPSEEK_API_KEY=你的_API_key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-pro
+```bash
+cp .env.example .env
 ```
+
+项目启动时会自动加载根目录下的 `.env`，且不会覆盖终端中已设置的同名变量。`.env` 已被 Git 忽略；只提交不含真实凭据的 `.env.example`，不要提交真实 API Key。
 
 ## 启动可视化网页
 
@@ -138,7 +138,7 @@ python3 main.py --web
 
 ### 配置 Qwen 图片、PDF 理解与 Web 搜索
 
-DeepSeek V4 Pro 继续负责主 Agent 决策；图片、PDF 理解和联网搜索由价格更低的通义千问承担。复制 [`qwen.env.template`](qwen.env.template) 中的变量名到本地 `.env`，再填写阿里云百炼的 API Key 和工作空间 ID：
+DeepSeek V4 Pro 继续负责主 Agent 决策；图片、PDF 理解和联网搜索由价格更低的通义千问承担。Qwen 所需变量已统一放在 [`.env.example`](.env.example) 中；复制后，在本地 `.env` 填写阿里云百炼的 API Key 和工作空间 ID：
 
 ```dotenv
 QWEN_API_KEY=你的_百炼_API_Key
