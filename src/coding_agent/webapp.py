@@ -781,6 +781,7 @@ class RunStore:
             "max_steps": session.max_steps,
             "messages": list(session.messages),
             "context": session.conversation.context_stats(),
+            "memory": session.conversation.memory_checkpoint(),
         }
 
     def _save_session_locked(self, session: SessionRecord) -> None:

@@ -33,6 +33,10 @@ const elements = {
   contextPercent: document.querySelector("#context-percent"),
   contextFill: document.querySelector("#context-fill"),
   contextDetail: document.querySelector("#context-detail"),
+  memoryCheckpoint: document.querySelector("#memory-checkpoint"),
+  memoryCount: document.querySelector("#memory-count"),
+  memoryGoal: document.querySelector("#memory-goal"),
+  memoryGroups: document.querySelector("#memory-groups"),
   chatMessages: document.querySelector("#chat-messages"),
   chatEmpty: document.querySelector("#chat-empty"),
   turnCount: document.querySelector("#turn-count"),
@@ -305,6 +309,7 @@ function resetConversationView() {
   elements.contextPercent.textContent = "0%";
   elements.contextFill.style.width = "0%";
   elements.contextDetail.textContent = "尚未开始会话";
+  renderMemory({});
 }
 
 function renderConversation(session) {
@@ -371,13 +376,55 @@ function renderConversation(session) {
   elements.contextPercent.textContent = `${percent}%`;
   elements.contextFill.style.width = `${percent}%`;
   const dropped = context.dropped_exchanges || 0;
-  elements.contextDetail.textContent = dropped
-    ? `保留 ${context.retained_exchanges} 轮 · 已压缩 ${dropped} 轮`
-    : `已记住 ${context.total_exchanges || 0} 轮 · 本地持久化`;
+  const compactedTools = context.compacted_tool_rounds || 0;
+  const estimated = Number(context.estimated_tokens || 0).toLocaleString("zh-CN");
+  const budget = Number(context.budget_tokens || 0).toLocaleString("zh-CN");
+  const calibration = context.token_calibrated
+    ? `已按 ${context.token_calibration_samples} 次真实用量校准`
+    : "首次调用前为本地估算";
+  const compression = dropped || compactedTools
+    ? ` · 压缩 ${dropped} 个旧会话轮次 / ${compactedTools} 个工具轮次`
+    : "";
+  elements.contextDetail.textContent = `${estimated} / ${budget} tokens · ${calibration}${compression}`;
+  renderMemory(session.memory || {});
   const turnCount = session.turn_count || 0;
   elements.turnCount.textContent = `${turnCount} ${turnCount === 1 ? "TURN" : "TURNS"}`;
   elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
   setRunning(state.running);
+}
+
+function renderMemory(memory) {
+  const labels = {
+    constraints: "用户约束",
+    completed: "已完成",
+    decisions: "关键决策",
+    modified_files: "修改文件",
+    tests: "测试记录",
+    failed_attempts: "失败尝试",
+    do_not_repeat: "避免重复",
+    next_steps: "下一步",
+  };
+  const goal = String(memory.goal || "").trim();
+  elements.memoryGoal.textContent = goal || "发送 Prompt 后自动提取当前目标。";
+  elements.memoryGroups.replaceChildren();
+  let count = goal ? 1 : 0;
+  for (const [key, label] of Object.entries(labels)) {
+    const values = Array.isArray(memory[key]) ? memory[key].filter(Boolean) : [];
+    if (!values.length) continue;
+    count += values.length;
+    const section = document.createElement("section");
+    const heading = document.createElement("small");
+    heading.textContent = label;
+    const list = document.createElement("ul");
+    for (const value of values) {
+      const item = document.createElement("li");
+      item.textContent = String(value);
+      list.append(item);
+    }
+    section.append(heading, list);
+    elements.memoryGroups.append(section);
+  }
+  elements.memoryCount.textContent = `${count} ${count === 1 ? "ITEM" : "ITEMS"}`;
 }
 
 function latestRunId(session) {

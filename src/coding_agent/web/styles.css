@@ -535,6 +535,43 @@ h1 em {
   font: 8px/1.35 var(--mono);
 }
 
+.memory-checkpoint {
+  margin: -13px 0 24px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.memory-checkpoint > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.memory-checkpoint > summary::-webkit-details-marker { display: none; }
+.memory-checkpoint > summary::after { content: "+"; font: 16px/1 var(--mono); }
+.memory-checkpoint[open] > summary::after { content: "−"; }
+.memory-checkpoint > summary > span { display: grid; gap: 4px; }
+.memory-checkpoint > summary small,
+.memory-checkpoint > summary strong,
+.memory-body small {
+  color: var(--muted);
+  font: 8px/1 var(--mono);
+  letter-spacing: 0.1em;
+}
+.memory-checkpoint > summary b { font-size: 12px; }
+.memory-checkpoint > summary strong { margin-left: auto; }
+.memory-body { display: grid; gap: 12px; padding: 0 14px 14px; border-top: 1px solid var(--line); }
+.memory-goal { padding-top: 12px; }
+.memory-goal p { margin: 6px 0 0; font-size: 11px; line-height: 1.55; }
+.memory-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.memory-groups section { min-width: 0; padding: 10px; background: rgba(21, 23, 20, 0.04); }
+.memory-groups ul { display: grid; gap: 5px; margin: 7px 0 0; padding-left: 15px; }
+.memory-groups li { overflow-wrap: anywhere; color: var(--muted); font-size: 9px; line-height: 1.45; }
+
 .field-label {
   display: flex;
   justify-content: space-between;
@@ -1985,6 +2022,10 @@ kbd {
     padding: 12px 0 0;
     border-top: 1px solid var(--line);
     border-left: 0;
+  }
+
+  .memory-groups {
+    grid-template-columns: 1fr;
   }
 
   .chat-message {

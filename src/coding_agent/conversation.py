@@ -352,15 +352,19 @@ class Conversation:
         project_rules = state.get("project_rules", "")
         if not isinstance(project_rules, str):
             raise ValueError("Conversation state has invalid project rules")
+        restored_max_tokens = cls._state_positive_int(
+            state.get("max_context_tokens"), 64_000
+        )
+        restored_reserve = cls._state_nonnegative_int(
+            state.get("response_reserve_tokens"), 8_000
+        )
+        if restored_reserve >= restored_max_tokens:
+            restored_reserve = max(0, restored_max_tokens // 8)
         conversation = cls(
             system_prompt,
             max_context_chars=max_context_chars,
-            max_context_tokens=cls._state_positive_int(
-                state.get("max_context_tokens"), 64_000
-            ),
-            response_reserve_tokens=cls._state_nonnegative_int(
-                state.get("response_reserve_tokens"), 8_000
-            ),
+            max_context_tokens=restored_max_tokens,
+            response_reserve_tokens=restored_reserve,
             project_rules=project_rules,
         )
         normalized: list[list[dict[str, Any]]] = []

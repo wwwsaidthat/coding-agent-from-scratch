@@ -7,7 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from coding_agent.conversation import Conversation
+from coding_agent.conversation import Conversation, MemoryCheckpoint
 from coding_agent.models import DeepSeekChatModel, ModelAPIError
 from coding_agent.prompts import system_prompt_for_models
 
@@ -351,6 +351,38 @@ class ConversationTests(unittest.TestCase):
         self.assertTrue(restored_stats["token_calibrated"])
         self.assertEqual(restored_stats["last_prompt_tokens"], 900)
         self.assertEqual(restored_stats["max_context_tokens"], 2_000)
+
+    def test_memory_and_token_state_are_bounded_during_restore(self) -> None:
+        checkpoint = MemoryCheckpoint.from_state(
+            {
+                "goal": "目" * 3_000,
+                "constraints": [f"constraint-{index}-" + "x" * 800 for index in range(40)],
+            }
+        )
+        self.assertEqual(len(checkpoint.goal), 2_000)
+        self.assertEqual(len(checkpoint.constraints), 24)
+        self.assertTrue(all(len(item) <= 600 for item in checkpoint.constraints))
+
+        state = {
+            "system_prompt": "system",
+            "project_rules": "",
+            "max_context_chars": 2_000,
+            "max_context_tokens": 200,
+            "response_reserve_tokens": 9_999,
+            "token_calibration": {"factor": 99, "samples": -2},
+            "exchanges": [
+                [
+                    {"role": "user", "content": "request"},
+                    {"role": "assistant", "content": "done"},
+                ]
+            ],
+            "active": False,
+        }
+        restored = Conversation.from_state(state)
+        stats = restored.context_stats()
+        self.assertEqual(stats["max_context_tokens"], 200)
+        self.assertLess(stats["response_reserve_tokens"], 200)
+        self.assertFalse(stats["token_calibrated"])
 
 
 if __name__ == "__main__":

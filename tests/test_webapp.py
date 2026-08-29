@@ -116,6 +116,7 @@ class WebApplicationTests(unittest.TestCase):
         self.assertTrue(self.get_json("/api/health")["ok"])
         config = self.get_json("/api/config")
         self.assertFalse(config["api_configured"])
+        self.assertEqual(config["context_budget_tokens"], 64_000)
         self.assertEqual(config["default_workspace"], str(self.workspace.resolve()))
         with urlopen(self.base_url + "/", timeout=3) as response:
             html = response.read().decode("utf-8")
@@ -124,6 +125,7 @@ class WebApplicationTests(unittest.TestCase):
             self.assertIn('id="approval-card"', html)
             self.assertIn('id="image-input"', html)
             self.assertIn('id="run-plan"', html)
+            self.assertIn('id="memory-checkpoint"', html)
             self.assertLess(html.index('id="conversation-memory-title"'), html.index('id="activity-title"'))
             self.assertNotIn('id="result-card"', html)
             self.assertIn("执行路径与确认", html)
@@ -231,6 +233,8 @@ class WebApplicationTests(unittest.TestCase):
             ["user", "assistant", "user", "assistant"],
         )
         self.assertEqual(current["context"]["total_exchanges"], 2)
+        self.assertEqual(current["memory"]["goal"], "follow-up turn")
+        self.assertIn("agent_demo.txt", current["memory"]["modified_files"])
 
         restored_app = LocalWebApplication(
             Settings(api_key=None, max_steps=10, command_timeout=5),
@@ -240,6 +244,7 @@ class WebApplicationTests(unittest.TestCase):
         self.assertIsNotNone(restored)
         self.assertEqual(restored["turn_count"], 2)
         self.assertEqual(restored["messages"][-1]["role"], "assistant")
+        self.assertEqual(restored["memory"], current["memory"])
         restored_prompt = restored_app.runs._sessions[session["id"]].conversation.api_messages()[0]["content"]
         self.assertIn("deepseek-v4-pro", restored_prompt)
         self.assertIn("qwen3.6-flash", restored_prompt)
