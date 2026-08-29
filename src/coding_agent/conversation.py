@@ -236,7 +236,7 @@ class Conversation:
         self._token_calibration.observe(raw, prompt_tokens)
 
     def api_messages(self) -> list[dict[str, Any]]:
-        retained, dropped = self._retained_exchanges()
+        retained, dropped, compacted_rounds, tool_summary = self._select_context()
         messages = self._layer_messages()
         if dropped:
             memory = self._memory_summary(self._exchanges[:dropped])
@@ -251,6 +251,19 @@ class Conversation:
                     ),
                 }
             )
+        if compacted_rounds:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"{compacted_rounds} earlier tool round(s) inside retained "
+                        "conversation exchanges were compacted as complete call/result "
+                        "blocks. Exact outputs remain in persistent traces; re-read files "
+                        "or rerun checks before relying on old details.\n\n"
+                        f"{tool_summary}"
+                    ),
+                }
+            )
         for exchange in retained:
             messages.extend(exchange)
         return messages
@@ -262,12 +275,23 @@ class Conversation:
         return messages
 
     def context_stats(self) -> dict[str, Any]:
-        retained, dropped = self._retained_exchanges()
+        retained, dropped, compacted_rounds, tool_summary = self._select_context()
         used = self._size(self._layer_messages(), retained)
         if dropped:
             used += len(self._memory_summary(self._exchanges[:dropped]))
-        estimated_tokens = self._request_token_estimate(retained, dropped)
+        if tool_summary:
+            used += len(tool_summary)
+        estimated_tokens = self._request_token_estimate(
+            retained, dropped, tool_summary=tool_summary
+        )
         prompt_budget = self._prompt_token_budget()
+        total_tool_rounds = sum(
+            len(self._tool_round_ranges(exchange)) for exchange in self._exchanges
+        )
+        dropped_tool_rounds = sum(
+            len(self._tool_round_ranges(exchange))
+            for exchange in self._exchanges[:dropped]
+        )
         return {
             "used_chars": used,
             "budget_chars": self.max_context_chars,
@@ -282,6 +306,11 @@ class Conversation:
             "total_exchanges": len(self._exchanges),
             "retained_exchanges": len(retained),
             "dropped_exchanges": dropped,
+            "total_tool_rounds": total_tool_rounds,
+            "retained_tool_rounds": (
+                total_tool_rounds - dropped_tool_rounds - compacted_rounds
+            ),
+            "compacted_tool_rounds": compacted_rounds,
             "project_rules_chars": len(self._project_rules),
             "memory_checkpoint_chars": len(self._checkpoint.render()),
             "memory_checkpoint_items": sum(
@@ -359,7 +388,13 @@ class Conversation:
         return conversation
 
     def _retained_exchanges(self) -> tuple[list[list[dict[str, Any]]], int]:
-        retained = list(self._exchanges)
+        retained, dropped, _, _ = self._select_context()
+        return retained, dropped
+
+    def _select_context(
+        self,
+    ) -> tuple[list[list[dict[str, Any]]], int, int, str]:
+        retained = [[dict(message) for message in exchange] for exchange in self._exchanges]
         dropped = 0
         layers = self._layer_messages()
         while len(retained) > 1:
@@ -367,7 +402,28 @@ class Conversation:
                 break
             retained.pop(0)
             dropped += 1
-        return retained, dropped
+
+        notes: list[str] = []
+        compacted_rounds = 0
+        while self._request_token_estimate(
+            retained,
+            dropped,
+            layers,
+            tool_summary="\n".join(notes),
+        ) > self._prompt_token_budget():
+            ranges = [
+                (exchange_index, start, end)
+                for exchange_index, exchange in enumerate(retained)
+                for start, end in self._tool_round_ranges(exchange)
+            ]
+            if len(ranges) <= 2:
+                break
+            exchange_index, start, end = ranges[0]
+            removed = retained[exchange_index][start:end]
+            notes.append(self._tool_round_summary(removed))
+            del retained[exchange_index][start:end]
+            compacted_rounds += 1
+        return retained, dropped, compacted_rounds, "\n".join(notes)
 
     def _layer_messages(self) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = [
@@ -393,14 +449,6 @@ class Conversation:
                         "persistent status record; verify file details before editing:\n"
                         + self._checkpoint.render()
                     ),
-                }
-            )
-        summary = self._completed_task_summary()
-        if summary:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": "Task history summary:\n" + summary,
                 }
             )
         if self._active and self._exchanges:
@@ -576,6 +624,8 @@ class Conversation:
         retained: Sequence[Sequence[Mapping[str, Any]]],
         dropped: int,
         layers: Sequence[Mapping[str, Any]] | None = None,
+        *,
+        tool_summary: str = "",
     ) -> int:
         messages: list[Mapping[str, Any]] = list(layers or self._layer_messages())
         if dropped:
@@ -585,10 +635,58 @@ class Conversation:
                     "content": self._memory_summary(self._exchanges[:dropped]),
                 }
             )
+        if tool_summary:
+            messages.append(
+                {"role": "system", "content": "Compacted tool rounds:\n" + tool_summary}
+            )
         for exchange in retained:
             messages.extend(exchange)
         raw = self._raw_token_estimate([*messages, *self._tool_definitions])
         return self._token_calibration.apply(raw)
+
+    @staticmethod
+    def _tool_round_ranges(
+        exchange: Sequence[Mapping[str, Any]],
+    ) -> list[tuple[int, int]]:
+        """Return atomic assistant-tool/result ranges within one user exchange."""
+        ranges: list[tuple[int, int]] = []
+        index = 1
+        while index < len(exchange):
+            message = exchange[index]
+            if message.get("role") != "assistant" or not message.get("tool_calls"):
+                index += 1
+                continue
+            end = index + 1
+            while end < len(exchange) and exchange[end].get("role") == "tool":
+                end += 1
+            ranges.append((index, end))
+            index = end
+        return ranges
+
+    @classmethod
+    def _tool_round_summary(cls, messages: Sequence[Mapping[str, Any]]) -> str:
+        assistant = messages[0] if messages else {}
+        calls = assistant.get("tool_calls", [])
+        names: list[str] = []
+        for call in calls if isinstance(calls, list) else []:
+            function = call.get("function") if isinstance(call, Mapping) else None
+            if isinstance(function, Mapping) and function.get("name"):
+                names.append(str(function["name"]))
+        successes = 0
+        failures = 0
+        codes: list[str] = []
+        for message in messages[1:]:
+            result = cls._json_mapping(message.get("content"))
+            if result.get("success") is True:
+                successes += 1
+            else:
+                failures += 1
+                metadata = result.get("metadata")
+                if isinstance(metadata, Mapping) and metadata.get("code"):
+                    codes.append(str(metadata["code"]))
+        tools = ", ".join(dict.fromkeys(names)) or "unknown"
+        suffix = f"; error_codes={','.join(dict.fromkeys(codes))}" if codes else ""
+        return f"- tools={tools}; successes={successes}; failures={failures}{suffix}"
 
     @classmethod
     def _raw_token_estimate(cls, values: Sequence[Mapping[str, Any]]) -> int:

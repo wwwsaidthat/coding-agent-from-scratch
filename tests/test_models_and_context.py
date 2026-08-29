@@ -130,6 +130,54 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(len(compacted), 1)
         self.assertIn("User request", compacted[0])
 
+    def test_long_exchange_compacts_whole_tool_rounds_and_keeps_recent_two(self) -> None:
+        conversation = Conversation(
+            "system",
+            max_context_tokens=900,
+            response_reserve_tokens=0,
+        )
+        conversation.start_user_turn("完成一个包含多步工具调用的任务")
+        for index in range(6):
+            call = self._tool_call(
+                f"call-{index}", "read_file", {"path": f"file-{index}.py"}
+            )
+            conversation.add_tool_turn(
+                {"role": "assistant", "content": None, "tool_calls": [call]},
+                [
+                    self._tool_message(
+                        f"call-{index}",
+                        {"success": True, "data": "x" * 1_000},
+                    )
+                ],
+            )
+        conversation.add_final("任务完成")
+
+        messages = conversation.api_messages()
+        retained_call_ids = [
+            call["id"]
+            for message in messages
+            if message.get("role") == "assistant"
+            for call in message.get("tool_calls", [])
+        ]
+        retained_tool_ids = [
+            message["tool_call_id"]
+            for message in messages
+            if message.get("role") == "tool"
+        ]
+        self.assertEqual(retained_call_ids, retained_tool_ids)
+        self.assertEqual(retained_call_ids, ["call-4", "call-5"])
+        summaries = [
+            message["content"]
+            for message in messages
+            if message.get("role") == "system"
+            and "earlier tool round(s)" in message["content"]
+        ]
+        self.assertEqual(len(summaries), 1)
+        self.assertIn("tools=read_file", summaries[0])
+        stats = conversation.context_stats()
+        self.assertEqual(stats["compacted_tool_rounds"], 4)
+        self.assertEqual(stats["retained_tool_rounds"], 2)
+
     def test_conversation_state_round_trip_and_context_stats(self) -> None:
         conversation = Conversation(
             "system",
