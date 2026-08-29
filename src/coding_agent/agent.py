@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import time
 from typing import Any, Callable, Mapping
 
@@ -14,6 +16,7 @@ from .tools.registry import ToolRegistry
 
 EventHandler = Callable[[str, Mapping[str, Any]], None]
 StopChecker = Callable[[], bool]
+MAX_CONTEXT_TOOL_RESULT_CHARS = 16_000
 
 
 class AgentError(RuntimeError):
@@ -170,6 +173,9 @@ class Agent:
                     tool_started = time.perf_counter()
                     result = self.tools.execute(call.name, call.arguments)
                     result_json = result.to_json()
+                    context_result_json, compression = self._compress_tool_result(
+                        result_json
+                    )
                     self._emit(
                         "tool_finish",
                         {
@@ -183,14 +189,18 @@ class Agent:
                             ),
                             "error_code": result.metadata.get("code"),
                             "metadata": dict(result.metadata),
+                            "context_compression": compression,
                         },
                     )
+
+                if repeated_calls >= 3:
+                    context_result_json, _ = self._compress_tool_result(result_json)
 
                 tool_messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": call.id,
-                        "content": result_json,
+                        "content": context_result_json,
                     }
                 )
             conversation.add_tool_turn(assistant_message, tool_messages)
@@ -252,3 +262,70 @@ class Agent:
             {key: value for key, value in message.items() if key != "reasoning_content"}
             for message in messages
         ]
+
+    @staticmethod
+    def _compress_tool_result(result_json: str) -> tuple[str, dict[str, Any]]:
+        original_chars = len(result_json)
+        digest = hashlib.sha256(result_json.encode("utf-8")).hexdigest()
+        if original_chars <= MAX_CONTEXT_TOOL_RESULT_CHARS:
+            return result_json, {
+                "truncated": False,
+                "original_chars": original_chars,
+                "returned_chars": original_chars,
+                "sha256": digest,
+                "strategy": "none",
+            }
+
+        try:
+            original = json.loads(result_json)
+        except json.JSONDecodeError:
+            original = {"success": False, "error": result_json}
+        if not isinstance(original, Mapping):
+            original = {"success": True, "data": original}
+
+        value_key = "data" if original.get("success") is True else "error"
+        value = original.get(value_key)
+        if isinstance(value, str):
+            rendered = value
+            data_type = "string"
+        else:
+            rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            data_type = type(value).__name__
+        preview_budget = MAX_CONTEXT_TOOL_RESULT_CHARS - 3_000
+        head_size = max(1, round(preview_budget * 0.72))
+        tail_size = max(1, preview_budget - head_size)
+        preview = (
+            rendered[:head_size]
+            + "\n… tool output compacted for model context …\n"
+            + rendered[-tail_size:]
+        )
+        metadata = original.get("metadata")
+        compacted: dict[str, Any] = {
+            "success": original.get("success") is True,
+            value_key: preview,
+            "metadata": {
+                **(dict(metadata) if isinstance(metadata, Mapping) else {}),
+                "context_compression": {
+                    "truncated": True,
+                    "original_chars": original_chars,
+                    "returned_chars": 0,
+                    "sha256": digest,
+                    "strategy": "head_tail",
+                    "original_data_type": data_type,
+                    "notice": (
+                        "Full output is retained in the local execution trace. "
+                        "Re-read or rerun for exact details."
+                    ),
+                },
+            },
+        }
+        serialized = ""
+        for _ in range(3):
+            serialized = json.dumps(compacted, ensure_ascii=False, separators=(",", ":"))
+            compacted["metadata"]["context_compression"]["returned_chars"] = len(
+                serialized
+            )
+        serialized = json.dumps(compacted, ensure_ascii=False, separators=(",", ":"))
+        compression = dict(compacted["metadata"]["context_compression"])
+        compression["returned_chars"] = len(serialized)
+        return serialized, compression

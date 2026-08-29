@@ -32,6 +32,7 @@ STATIC_ROOT = Path(__file__).resolve().parent / "web"
 MAX_REQUEST_BYTES = 64_000
 MAX_UPLOAD_REQUEST_BYTES = 14_000_000
 MAX_EVENT_STRING = 80_000
+MAX_TRACE_STRING = 2_500_000
 MAX_RUNS = 25
 MAX_SESSIONS_RETURNED = 50
 SESSION_STATE_VERSION = 1
@@ -44,14 +45,25 @@ def _now() -> str:
 
 
 def _safe_value(value: Any) -> Any:
+    return _bounded_value(value, MAX_EVENT_STRING, "web view")
+
+
+def _trace_value(value: Any) -> Any:
+    return _bounded_value(value, MAX_TRACE_STRING, "persistent trace")
+
+
+def _bounded_value(value: Any, limit: int, label: str) -> Any:
     if isinstance(value, str):
-        if len(value) > MAX_EVENT_STRING:
-            return value[:MAX_EVENT_STRING] + "\n… output truncated by web view …"
+        if len(value) > limit:
+            return value[:limit] + f"\n… output truncated by {label} …"
         return value
     if isinstance(value, Mapping):
-        return {str(key): _safe_value(item) for key, item in value.items()}
+        return {
+            str(key): _bounded_value(item, limit, label)
+            for key, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
-        return [_safe_value(item) for item in value]
+        return [_bounded_value(item, limit, label) for item in value]
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return str(value)
@@ -393,7 +405,7 @@ class RunStore:
             safe_payload = dict(payload)
             safe_payload.pop("request_messages", None)
             safe_payload.pop("tool_definitions", None)
-            public["payload"] = safe_payload
+            public["payload"] = _safe_value(safe_payload)
         return public
 
     def _update_plan(
@@ -620,15 +632,16 @@ class RunStore:
     ) -> None:
         self._record_metrics_locked(record, event_type, payload)
         timestamp = _now()
-        safe_payload = _safe_value(payload)
+        trace_payload = _trace_value(payload)
         trace_event = {
             "seq": record.next_event_seq,
             "type": event_type,
             "timestamp": timestamp,
-            "payload": safe_payload,
+            "payload": trace_payload,
         }
         record.trace_events.append(trace_event)
-        public_payload = dict(safe_payload) if isinstance(safe_payload, Mapping) else {}
+        public_payload = _safe_value(payload)
+        public_payload = dict(public_payload) if isinstance(public_payload, Mapping) else {}
         public_payload.pop("request_messages", None)
         public_payload.pop("tool_definitions", None)
         record.events.append(

@@ -370,6 +370,43 @@ class WebApplicationTests(unittest.TestCase):
         self.assertIsNotNone(restored)
         self.assertNotIn("request_messages", restored["events"][0]["payload"])
 
+    def test_persistent_trace_keeps_full_tool_output_while_public_view_is_bounded(self) -> None:
+        store = RunStore(
+            Settings(api_key=None, max_steps=10, command_timeout=5),
+            self.workspace / "large-trace" / "sessions",
+        )
+        record = RunRecord(
+            id="large-trace-unit",
+            session_id="session-unit",
+            turn=1,
+            task="large output",
+            workspace=str(self.workspace),
+            demo=True,
+            max_steps=10,
+        )
+        full_result = "BEGIN-" + "x" * 120_000 + "-END"
+        with store._lock:
+            store._append_locked(
+                record,
+                "tool_finish",
+                {
+                    "name": "read_file",
+                    "arguments": '{"path":"large.txt"}',
+                    "result": full_result,
+                    "success": True,
+                },
+            )
+
+        trace_path = store.trace_dir / "large-trace-unit.json"
+        persisted = json.loads(trace_path.read_text(encoding="utf-8"))
+        stored_result = persisted["trace"]["events"][0]["payload"]["result"]
+        self.assertEqual(stored_result, full_result)
+        public = store.get_public("large-trace-unit")
+        self.assertIsNotNone(public)
+        public_result = public["events"][0]["payload"]["result"]
+        self.assertLess(len(public_result), len(full_result))
+        self.assertIn("truncated by web view", public_result)
+
 
 if __name__ == "__main__":
     unittest.main()

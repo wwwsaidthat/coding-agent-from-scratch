@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,8 @@ from coding_agent.agent import Agent, AgentCancelledError, AgentError, AgentLimi
 from coding_agent.cli import build_registry, main
 from coding_agent.conversation import Conversation
 from coding_agent.models import ModelResponse, ScriptedDemoModel, ToolCall
+from coding_agent.tools.base import ToolResult
+from coding_agent.tools.registry import ToolRegistry
 
 
 class AlwaysCallsToolModel:
@@ -45,6 +48,31 @@ class UsageReportingModel:
             content="usage recorded",
             metadata={"usage": {"prompt_tokens": 321, "completion_tokens": 7}},
         )
+
+
+class LargeOutputTool:
+    name = "large_output"
+    description = "Return a deliberately large test value."
+    parameters = {"type": "object", "properties": {}, "additionalProperties": False}
+
+    def run(self, arguments):
+        del arguments
+        return ToolResult.ok("BEGIN-" + "x" * 40_000 + "-END")
+
+
+class LargeOutputModel:
+    def __init__(self):
+        self.requests = []
+
+    def complete(self, messages, tools):
+        del tools
+        self.requests.append(messages)
+        if len(self.requests) == 1:
+            return ModelResponse(
+                content=None,
+                tool_calls=(ToolCall("large-1", "large_output", "{}"),),
+            )
+        return ModelResponse(content="large output handled")
 
 
 class AgentLoopTests(unittest.TestCase):
@@ -136,6 +164,31 @@ class AgentLoopTests(unittest.TestCase):
             stats = conversation.context_stats()
             self.assertTrue(stats["token_calibrated"])
             self.assertEqual(stats["last_prompt_tokens"], 321)
+
+    def test_large_tool_output_is_compacted_for_model_but_full_in_event(self) -> None:
+        model = LargeOutputModel()
+        events = []
+        agent = Agent(
+            model,
+            ToolRegistry([LargeOutputTool()]),
+            on_event=lambda event, payload: events.append((event, payload)),
+        )
+
+        agent.run("handle a large tool result")
+
+        tool_message = next(
+            message for message in model.requests[1] if message.get("role") == "tool"
+        )
+        compacted = json.loads(tool_message["content"])
+        compression = compacted["metadata"]["context_compression"]
+        self.assertTrue(compression["truncated"])
+        self.assertGreater(compression["original_chars"], 40_000)
+        self.assertLess(len(tool_message["content"]), 17_000)
+        self.assertIn("BEGIN-", compacted["data"])
+        self.assertIn("-END", compacted["data"])
+        finish = next(payload for event, payload in events if event == "tool_finish")
+        self.assertGreater(len(finish["result"]), 40_000)
+        self.assertTrue(finish["context_compression"]["truncated"])
 
     def test_cli_demo_runs_without_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
