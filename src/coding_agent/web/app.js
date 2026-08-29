@@ -40,8 +40,8 @@ const elements = {
   chatMessages: document.querySelector("#chat-messages"),
   chatEmpty: document.querySelector("#chat-empty"),
   turnCount: document.querySelector("#turn-count"),
-  imageInput: document.querySelector("#image-input"),
-  pendingImages: document.querySelector("#pending-images"),
+  attachmentInput: document.querySelector("#attachment-input"),
+  pendingAttachments: document.querySelector("#pending-attachments"),
   visionState: document.querySelector("#vision-state"),
   runPlan: document.querySelector("#run-plan"),
   planProgress: document.querySelector("#plan-progress"),
@@ -69,7 +69,7 @@ const state = {
   running: false,
   approvalId: null,
   selectedRunId: null,
-  pendingImageFiles: [],
+  pendingAttachmentFiles: [],
 };
 
 const statusLabels = {
@@ -275,7 +275,7 @@ function setRunning(running) {
       : "开始会话";
   elements.stopButton.hidden = !running;
   elements.prompt.disabled = running;
-  elements.imageInput.disabled = running;
+  elements.attachmentInput.disabled = running;
   const sessionLocked = Boolean(state.sessionId);
   elements.workspace.disabled = running || sessionLocked;
   elements.demo.disabled = running || sessionLocked;
@@ -522,7 +522,7 @@ async function deleteSession(session) {
   }
   const title = session.title || "新会话";
   const confirmed = window.confirm(
-    `确定永久删除会话“${title}”吗？\n\n消息、上下文、执行轨迹和该会话上传的图片都会被删除，此操作无法撤销。`,
+    `确定永久删除会话“${title}”吗？\n\n消息、上下文、执行轨迹和该会话上传的附件都会被删除，此操作无法撤销。`,
   );
   if (!confirmed) return;
   try {
@@ -571,8 +571,8 @@ function startFreshSession() {
   state.sessionId = null;
   state.runId = null;
   state.selectedRunId = null;
-  state.pendingImageFiles = [];
-  renderPendingImages();
+  state.pendingAttachmentFiles = [];
+  renderPendingAttachments();
   window.localStorage.removeItem("loopcoder.session");
   markActiveSession("");
   resetConversationView();
@@ -917,23 +917,27 @@ async function pollRun() {
   }
 }
 
-function renderPendingImages() {
-  elements.pendingImages.replaceChildren();
-  for (const [index, file] of state.pendingImageFiles.entries()) {
+function isPdfFile(file) {
+  return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+}
+
+function renderPendingAttachments() {
+  elements.pendingAttachments.replaceChildren();
+  for (const [index, file] of state.pendingAttachmentFiles.entries()) {
     const chip = document.createElement("span");
-    chip.className = "pending-image";
+    chip.className = "pending-attachment";
     const name = document.createElement("b");
-    name.textContent = `▧ ${file.name}`;
+    name.textContent = `${isPdfFile(file) ? "PDF" : "▧"} ${file.name}`;
     const remove = document.createElement("button");
     remove.type = "button";
     remove.textContent = "×";
-    remove.title = "移除图片";
+    remove.title = "移除附件";
     remove.addEventListener("click", () => {
-      state.pendingImageFiles.splice(index, 1);
-      renderPendingImages();
+      state.pendingAttachmentFiles.splice(index, 1);
+      renderPendingAttachments();
     });
     chip.append(name, remove);
-    elements.pendingImages.append(chip);
+    elements.pendingAttachments.append(chip);
   }
 }
 
@@ -941,16 +945,17 @@ function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
-    reader.onerror = () => reject(new Error(`无法读取图片：${file.name}`));
+    reader.onerror = () => reject(new Error(`无法读取附件：${file.name}`));
     reader.readAsDataURL(file);
   });
 }
 
-async function uploadPendingImages() {
+async function uploadPendingAttachments() {
   const attachments = [];
-  for (const file of state.pendingImageFiles) {
+  for (const file of state.pendingAttachmentFiles) {
     const data = await fileToBase64(file);
-    const uploaded = await api(`/api/sessions/${state.sessionId}/images`, {
+    const endpoint = isPdfFile(file) ? "pdfs" : "images";
+    const uploaded = await api(`/api/sessions/${state.sessionId}/${endpoint}`, {
       method: "POST",
       body: JSON.stringify({ filename: file.name, data_base64: data }),
     });
@@ -974,7 +979,7 @@ async function startRun(event) {
   setRunStatus("queued");
   try {
     if (!state.sessionId) await createSession();
-    const attachments = await uploadPendingImages();
+    const attachments = await uploadPendingAttachments();
     const run = await api(`/api/sessions/${state.sessionId}/messages`, {
       method: "POST",
       body: JSON.stringify({
@@ -985,8 +990,8 @@ async function startRun(event) {
     state.runId = run.id;
     state.selectedRunId = run.id;
     state.startedAt = Date.now();
-    state.pendingImageFiles = [];
-    renderPendingImages();
+    state.pendingAttachmentFiles = [];
+    renderPendingAttachments();
     elements.prompt.value = "";
     elements.prompt.dispatchEvent(new Event("input"));
     state.clockTimer = window.setInterval(updateClock, 500);
@@ -1026,8 +1031,8 @@ async function initialize() {
     elements.maxSteps.value = config.max_steps;
     elements.maxStepsValue.textContent = config.max_steps;
     elements.visionState.textContent = config.vision_configured
-      ? `图片理解：${config.vision_model}`
-      : "图片理解：尚未配置 QWEN_API_KEY";
+      ? `图片 / PDF 理解：${config.vision_model}`
+      : "图片 / PDF 理解：尚未配置 QWEN_API_KEY";
     elements.visionState.classList.toggle("configured", Boolean(config.vision_configured));
     if (!config.api_configured) elements.demo.checked = true;
     const recentSession = await loadSessionList();
@@ -1070,26 +1075,28 @@ elements.prompt.addEventListener("keydown", (event) => {
     elements.form.requestSubmit();
   }
 });
-elements.imageInput.addEventListener("change", () => {
-  const selected = Array.from(elements.imageInput.files || []);
-  const allowed = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+elements.attachmentInput.addEventListener("change", () => {
+  const selected = Array.from(elements.attachmentInput.files || []);
+  const allowedImages = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
   for (const file of selected) {
-    if (!allowed.has(file.type)) {
-      elements.formMessage.textContent = `${file.name} 不是支持的 PNG/JPEG/WebP/GIF 图片。`;
+    const isPdf = isPdfFile(file);
+    if (!isPdf && !allowedImages.has(file.type)) {
+      elements.formMessage.textContent = `${file.name} 不是支持的 PNG/JPEG/WebP/GIF 图片或 PDF。`;
       continue;
     }
-    if (file.size > 10_000_000) {
-      elements.formMessage.textContent = `${file.name} 超过 10 MB。`;
+    const limit = isPdf ? 20_000_000 : 10_000_000;
+    if (file.size > limit) {
+      elements.formMessage.textContent = `${file.name} 超过 ${isPdf ? 20 : 10} MB。`;
       continue;
     }
-    if (state.pendingImageFiles.length >= 5) {
-      elements.formMessage.textContent = "每轮最多添加 5 张图片。";
+    if (state.pendingAttachmentFiles.length >= 5) {
+      elements.formMessage.textContent = "每轮最多添加 5 个附件。";
       break;
     }
-    state.pendingImageFiles.push(file);
+    state.pendingAttachmentFiles.push(file);
   }
-  elements.imageInput.value = "";
-  renderPendingImages();
+  elements.attachmentInput.value = "";
+  renderPendingAttachments();
 });
 elements.maxSteps.addEventListener("input", () => {
   elements.maxStepsValue.textContent = elements.maxSteps.value;

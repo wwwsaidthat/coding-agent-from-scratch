@@ -7,7 +7,7 @@
 ## 当前能力
 
 - DeepSeek `deepseek-v4-pro` Chat Completions 接入；
-- 通义千问 `qwen3.6-flash` 图片理解与联网搜索（发送前必须由用户确认）；
+- 通义千问 `qwen3.6-flash` 图片、PDF 理解与联网搜索（发送前必须由用户确认）；
 - 模型 - 工具 - 结果 - 模型的自主执行循环；
 - `rg` 驱动的专业文件发现与代码检索，结构化返回文件、行号、列号和截断状态；
 - 强制先读后改、文件版本哈希冲突检测、原子写入和原子 `multi_edit`；
@@ -19,7 +19,7 @@
 - 可视化 Web 工作台，可输入 Prompt、设置工作区并逐轮查看 Thought / Action / Observation；
 - 本地前后端 API，支持任务状态、步数/工具统计、停止请求和最终结果；
 - 类 Codex 的多轮会话侧边栏：可继续追问、切换历史会话，并在服务重启后恢复；
-- 会话可在侧边栏中永久删除，同时清理对应消息、上下文、Trace 和上传图片；
+- 会话可在侧边栏中永久删除，同时清理对应消息、上下文、Trace 和上传附件；
 - 会话与工作区一一绑定，切换会话时同时切换上下文和可访问目录；
 - 分层上下文：固定规则、结构化任务检查点、压缩摘要、当前 Todo 与近期完整工具轨迹；
 - 真实 Token 用量校准：首次保守估算，随后根据 API `prompt_tokens` 自动校准并预留回答空间；
@@ -62,6 +62,7 @@
 - Python 3.10 或更高版本；
 - 使用真实模型时需要 DeepSeek API key；
 - `ripgrep`（命令 `rg`），用于 `find_files` 和 `search_code`；
+- Poppler（命令 `pdfinfo` 和 `pdftoppm`），用于在本地校验并渲染 PDF；
 - macOS、Linux 或 Windows 均可，具体可执行命令取决于本机环境。
 
 ## 先运行离线演示
@@ -132,12 +133,12 @@ python3 main.py --web
 5. 逐轮查看 Thought 决策摘要、Action 工具参数、Observation 工具结果；
 6. 修改前检查红删绿增 Diff，并选择“同意并写入”或“拒绝修改”；
 7. 查看模型步骤、工具调用、耗时、Token 与最终回答，或停止运行中的任务。
-8. 添加 PNG/JPEG/WebP/GIF 图片，由 Qwen 理解图片内容；联网或上传图片前会弹出确认卡片。
+8. 添加 PNG/JPEG/WebP/GIF 图片或 PDF，由 Qwen 理解内容；发送给 Qwen 前会弹出确认卡片。
 9. 复杂任务会显示逐步 Plan；点击历史消息可切换到该轮的计划和 Trace。
 
-### 配置 Qwen 图片理解与 Web 搜索
+### 配置 Qwen 图片、PDF 理解与 Web 搜索
 
-DeepSeek V4 Pro 继续负责主 Agent 决策；图片理解和联网搜索由价格更低的通义千问承担。复制 [`qwen.env.template`](qwen.env.template) 中的变量名到本地 `.env`，再填写阿里云百炼的 API Key 和工作空间 ID：
+DeepSeek V4 Pro 继续负责主 Agent 决策；图片、PDF 理解和联网搜索由价格更低的通义千问承担。复制 [`qwen.env.template`](qwen.env.template) 中的变量名到本地 `.env`，再填写阿里云百炼的 API Key 和工作空间 ID：
 
 ```dotenv
 QWEN_API_KEY=你的_百炼_API_Key
@@ -145,7 +146,7 @@ QWEN_BASE_URL=https://你的工作空间ID.cn-beijing.maas.aliyuncs.com/compatib
 QWEN_MODEL=qwen3.6-flash
 ```
 
-网页只会显示是否已配置，不会返回 API Key。添加图片只会先保存到当前会话工作区的 `.agent-images/`；只有 Agent 实际调用 `analyze_image` 且你点击同意后，图片才会发送给阿里云。`web_search` 同样会先展示搜索词并等待确认。
+网页只会显示是否已配置，不会返回 API Key。图片先保存在当前会话工作区的 `.agent-images/`，PDF 保存在 `.agent-files/`。只有 Agent 实际调用 `analyze_image` 或 `analyze_pdf` 且你点击同意后，内容才会发送给阿里云。PDF 会先通过 Poppler 在本地逐页转成 JPEG，再按页序交给 Qwen，因此扫描型 PDF 也可以解读；单个 PDF 上限为 20 MB、50 页。`web_search` 同样会先展示搜索词并等待确认。
 
 ### 多轮对话与上下文记忆
 
@@ -206,6 +207,7 @@ python3 main.py --workspace /path/to/project
 | `update_plan` | 创建并更新复杂任务计划 | 至多一个进行中步骤，完成后逐项打勾 |
 | `web_search` | 通过 Qwen 检索最新网页信息 | 查询发送前必须由用户明确同意 |
 | `analyze_image` | 通过 Qwen 理解工作区图片 | 图片上传前显示路径、大小、哈希并请求同意 |
+| `analyze_pdf` | 通过 Qwen 解读工作区 PDF | 本地逐页渲染；最多 20 MB、50 页；发送前请求同意 |
 
 ## 运行测试
 

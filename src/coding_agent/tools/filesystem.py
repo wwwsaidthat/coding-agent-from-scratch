@@ -41,13 +41,15 @@ IGNORED_DIRECTORIES = {
     "__pycache__",
     "node_modules",
     ".agent-images",
+    ".agent-files",
 }
 
 
 ApprovalHandler = Callable[[Mapping[str, Any]], bool]
 EditApprovalHandler = ApprovalHandler
 
-
+# 乐观锁的实现，读取文件之后并不会将文件锁住，但是如果用户在读取之后修改，这里会报conflict，后续模型会重新读文件
+# 这里是实现将一个文件的快照转换成json的格式
 @dataclass(frozen=True, slots=True)
 class FileRevision:
     size: int
@@ -64,13 +66,14 @@ class FileRevision:
 
 class WorkspacePaths:
     def __init__(self, root: Path) -> None:
-        self.root = root.expanduser().resolve()
+        self.root = root.expanduser().resolve() # 转换成规范的绝对路径
         if not self.root.is_dir():
             raise ValueError(f"Workspace does not exist or is not a directory: {self.root}")
         self.edit_lock = threading.RLock()
         self._revisions: dict[Path, FileRevision] = {}
 
     def resolve(self, user_path: str, *, allow_missing: bool = False) -> Path:
+        """防止工作范围超过工作区"""
         del allow_missing  # Kept in the public helper signature for caller clarity.
         path = Path(user_path)
         if path.is_absolute():

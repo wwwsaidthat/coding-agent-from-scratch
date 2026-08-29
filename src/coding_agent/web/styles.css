@@ -685,7 +685,7 @@ kbd {
   margin-top: 10px;
 }
 
-.image-picker {
+.attachment-picker {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -703,14 +703,14 @@ kbd {
 
 .vision-state.configured { color: #4d861f; }
 
-.pending-images {
+.pending-attachments {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
 }
 
-.pending-image {
+.pending-attachment {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -722,8 +722,8 @@ kbd {
   font: 8px/1 var(--mono);
 }
 
-.pending-image b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-.pending-image button { border: 0; background: transparent; cursor: pointer; font-size: 14px; line-height: 1; }
+.pending-attachment b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.pending-attachment button { border: 0; background: transparent; cursor: pointer; font-size: 14px; line-height: 1; }
 
 .privacy-note {
   display: inline-flex;

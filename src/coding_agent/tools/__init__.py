@@ -7,7 +7,7 @@ from .filesystem import (
     ReplaceInFileTool,
     WriteFileTool,
 )
-from .external import AnalyzeImageTool, QwenChatClient, WebSearchTool
+from .external import AnalyzeImageTool, AnalyzePdfTool, QwenChatClient, WebSearchTool
 from .planning import PlanHandler, UpdatePlanTool
 from .registry import ToolRegistry
 from .search import FindFilesTool, SearchCodeTool
@@ -15,6 +15,7 @@ from .shell import RunCommandTool
 
 __all__ = [
     "AnalyzeImageTool",
+    "AnalyzePdfTool",
     "FindFilesTool",
     "ListFilesTool",
     "MultiEditTool",

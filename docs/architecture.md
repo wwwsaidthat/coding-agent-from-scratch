@@ -24,7 +24,7 @@ cli.py
         ├── registry.py         工具注册、JSON 解析和调度
         ├── filesystem.py       版本锁、Diff、审批和原子文件编辑
         ├── search.py           rg 文件发现与结构化代码搜索
-        ├── external.py         Qwen 联网搜索与图片理解（审批后传输）
+        ├── external.py         Qwen 联网搜索及图片/PDF 理解（审批后传输）
         ├── planning.py         复杂任务结构化 Plan 与状态更新
         └── shell.py            受限本地命令工具
 
@@ -50,14 +50,14 @@ Web 界面不在浏览器中执行 Agent，而是通过本地 API 建立会话�
        ↓
 后台线程运行 Agent 循环 → 事件写入内存与 Trace
        ↑                              ↓
-编辑/联网/图片工具请求   GET /api/runs/{id} 短轮询
+编辑/联网/图片/PDF 工具请求   GET /api/runs/{id} 短轮询
        ↓                              ↓
 等待用户同意/拒绝       聊天、Plan、时间线、审批卡片和结果
        ↓ POST /api/runs/{run}/approvals/{approval}
 批准后执行修改或外部传输；拒绝则返回结构化错误
 ```
 
-DeepSeek 只接收文本上下文并负责主 Agent 决策。`web_search` 和 `analyze_image` 使用通义千问兼容接口；查询文本或图片字节在用户批准前不会离开本机。图片附件先存入会话工作区的 `.agent-images/`，该目录不进入 Git，也不会出现在普通文件列表中。
+DeepSeek 只接收文本上下文并负责主 Agent 决策。`web_search`、`analyze_image` 和 `analyze_pdf` 使用通义千问兼容接口；查询文本、图片或 PDF 页面在用户批准前不会离开本机。图片附件先存入会话工作区的 `.agent-images/`，PDF 存入 `.agent-files/`，这些目录不进入 Git，也不会出现在普通文件列表中。PDF 在本地通过 Poppler 校验页数并逐页渲染为 JPEG，批准后才把有序页面交给 Qwen。
 
 复杂任务可由模型调用 `update_plan` 建立最多 20 个步骤，每次只允许一个 `in_progress`。计划状态与 Trace 一起持久化；网页会用 `✓` 展示完成步骤。聊天消息保存各自的 `run_id`，因此点击历史消息时可以载入该轮持久化 Trace，而不是只显示最后一次运行。
 

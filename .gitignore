@@ -23,4 +23,5 @@ dist/
 # Agent scratch output
 .coding-agent/
 .agent-images/
+.agent-files/
 agent_demo.txt

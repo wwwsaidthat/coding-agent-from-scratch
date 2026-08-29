@@ -25,12 +25,18 @@ from .config import Settings
 from .conversation import Conversation
 from .models import DeepSeekChatModel, ModelAPIError, ScriptedDemoModel
 from .prompts import system_prompt_for_models
-from .tools.external import MAX_IMAGE_BYTES, detect_image_mime
+from .tools.external import (
+    MAX_IMAGE_BYTES,
+    MAX_PDF_BYTES,
+    detect_image_mime,
+    detect_pdf_mime,
+)
 
 
 STATIC_ROOT = Path(__file__).resolve().parent / "web"
 MAX_REQUEST_BYTES = 64_000
 MAX_UPLOAD_REQUEST_BYTES = 14_000_000
+MAX_PDF_UPLOAD_REQUEST_BYTES = 28_000_000
 MAX_EVENT_STRING = 80_000
 MAX_TRACE_STRING = 2_500_000
 MAX_RUNS = 25
@@ -222,11 +228,18 @@ class RunStore:
             image_directory = (image_root / session.id).resolve()
             if image_directory.parent != image_root:
                 raise WebRequestError("会话图片目录异常，拒绝删除")
+            file_root = (Path(session.workspace) / ".agent-files").resolve()
+            file_directory = (file_root / session.id).resolve()
+            if file_directory.parent != file_root:
+                raise WebRequestError("会话文件目录异常，拒绝删除")
 
             removed_images = image_directory.is_dir()
+            removed_files = file_directory.is_dir()
             try:
                 if removed_images:
                     shutil.rmtree(image_directory)
+                if removed_files:
+                    shutil.rmtree(file_directory)
                 for run_id in run_ids:
                     (self.trace_dir / f"{run_id}.json").unlink(missing_ok=True)
                 (self.state_dir / f"{session.id}.json").unlink(missing_ok=True)
@@ -241,6 +254,7 @@ class RunStore:
                 "session_id": session.id,
                 "trace_count": len(run_ids),
                 "removed_images": removed_images,
+                "removed_files": removed_files,
             }
 
     def add_message(
@@ -261,8 +275,9 @@ class RunStore:
             if safe_attachments:
                 rendered = "\n".join(f"- {path}" for path in safe_attachments)
                 agent_task += (
-                    "\n\nAttached workspace images:\n"
-                    f"{rendered}\nUse analyze_image when visual understanding is needed."
+                    "\n\nAttached workspace files:\n"
+                    f"{rendered}\nUse analyze_image for an attached image and analyze_pdf "
+                    "for an attached PDF when understanding its contents is needed."
                 )
 
             turn = 1 + sum(
@@ -340,21 +355,63 @@ class RunStore:
                 "size_bytes": len(content),
             }
 
+    def save_pdf(self, session_id: str, filename: str, content: bytes) -> dict[str, Any]:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                raise WebRequestError("找不到该会话")
+            if not content or len(content) > MAX_PDF_BYTES:
+                raise WebRequestError("PDF 不能为空且不能超过 20 MB")
+            try:
+                mime = detect_pdf_mime(content, filename)
+            except Exception as exc:
+                message = getattr(exc, "message", str(exc))
+                raise WebRequestError(message) from exc
+            basename = Path(filename).name
+            basename = re.sub(r"[^A-Za-z0-9._-]+", "_", basename).strip("._")
+            if not basename:
+                basename = "document.pdf"
+            if not basename.lower().endswith(".pdf"):
+                basename += ".pdf"
+            directory = Path(session.workspace) / ".agent-files" / session.id
+            directory.mkdir(parents=True, exist_ok=True)
+            target = directory / f"{uuid4().hex[:10]}-{basename}"
+            temporary = target.with_suffix(target.suffix + ".tmp")
+            try:
+                temporary.write_bytes(content)
+                temporary.chmod(0o600)
+                temporary.replace(target)
+            finally:
+                temporary.unlink(missing_ok=True)
+            relative = str(target.relative_to(Path(session.workspace)))
+            return {
+                "path": relative,
+                "name": basename,
+                "mime_type": mime,
+                "size_bytes": len(content),
+            }
+
     @staticmethod
     def _validate_attachments_locked(
         session: SessionRecord, attachments: Sequence[str]
     ) -> list[str]:
         if len(attachments) > 5:
-            raise WebRequestError("每轮最多附加 5 张图片")
+            raise WebRequestError("每轮最多附加 5 个文件")
         root = Path(session.workspace).resolve()
-        allowed = (root / ".agent-images" / session.id).resolve()
+        allowed_directories = {
+            (root / ".agent-images" / session.id).resolve(),
+            (root / ".agent-files" / session.id).resolve(),
+        }
         normalized: list[str] = []
         for relative in attachments:
             if not isinstance(relative, str) or not relative:
-                raise WebRequestError("图片附件路径无效")
+                raise WebRequestError("附件路径无效")
             candidate = (root / relative).resolve()
-            if allowed not in candidate.parents or not candidate.is_file():
-                raise WebRequestError("图片附件不属于当前会话")
+            if (
+                not any(allowed in candidate.parents for allowed in allowed_directories)
+                or not candidate.is_file()
+            ):
+                raise WebRequestError("附件不属于当前会话")
             normalized.append(str(candidate.relative_to(root)))
         return normalized
 
@@ -901,7 +958,7 @@ class LocalWebApplication:
         if not isinstance(attachments, list) or any(
             not isinstance(path, str) for path in attachments
         ):
-            raise WebRequestError("attachments 必须是图片路径数组")
+            raise WebRequestError("attachments 必须是附件路径数组")
         record = self.runs.add_message(session_id, task, attachments)
         public = self.runs.get_public(record.id)
         assert public is not None
@@ -921,6 +978,21 @@ class LocalWebApplication:
         except (ValueError, binascii.Error) as exc:
             raise WebRequestError("图片内容不是有效的 Base64") from exc
         return self.runs.save_image(session_id, filename, content)
+
+    def upload_session_pdf(
+        self, session_id: str, body: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        filename = body.get("filename")
+        encoded = body.get("data_base64")
+        if not isinstance(filename, str) or not filename.strip():
+            raise WebRequestError("PDF 文件名无效")
+        if not isinstance(encoded, str) or not encoded:
+            raise WebRequestError("PDF 内容为空")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise WebRequestError("PDF 内容不是有效的 Base64") from exc
+        return self.runs.save_pdf(session_id, filename, content)
 
     def create_run(self, body: Mapping[str, Any]) -> dict[str, Any]:
         task = self._task(body)
@@ -1033,8 +1105,16 @@ def make_handler(application: LocalWebApplication) -> type[BaseHTTPRequestHandle
                     parsed.path.startswith("/api/sessions/")
                     and parsed.path.endswith("/images")
                 )
+                is_pdf_upload = (
+                    parsed.path.startswith("/api/sessions/")
+                    and parsed.path.endswith("/pdfs")
+                )
                 body = self._read_json(
-                    MAX_UPLOAD_REQUEST_BYTES if is_image_upload else MAX_REQUEST_BYTES
+                    MAX_PDF_UPLOAD_REQUEST_BYTES
+                    if is_pdf_upload
+                    else MAX_UPLOAD_REQUEST_BYTES
+                    if is_image_upload
+                    else MAX_REQUEST_BYTES
                 )
                 if parsed.path == "/api/sessions":
                     self._json(application.create_session(body), HTTPStatus.CREATED)
@@ -1056,6 +1136,15 @@ def make_handler(application: LocalWebApplication) -> type[BaseHTTPRequestHandle
                     ).strip("/")
                     self._json(
                         application.upload_session_image(session_id, body),
+                        HTTPStatus.CREATED,
+                    )
+                    return
+                if is_pdf_upload:
+                    session_id = parsed.path.removeprefix("/api/sessions/").removesuffix(
+                        "/pdfs"
+                    ).strip("/")
+                    self._json(
+                        application.upload_session_pdf(session_id, body),
                         HTTPStatus.CREATED,
                     )
                     return

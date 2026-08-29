@@ -42,6 +42,7 @@ class ToolResult:
             payload["metadata"] = dict(self.metadata)
         return json.dumps(payload, ensure_ascii=False)
 
+# 规定了tool的结构是什么样子的
 
 class Tool(Protocol):
     name: str
@@ -51,6 +52,7 @@ class Tool(Protocol):
     def run(self, arguments: Mapping[str, Any]) -> ToolResult:
         """Execute a validated local action."""
 
+# 处理参数的几个工具函数
 
 def reject_unknown(arguments: Mapping[str, Any], allowed: set[str]) -> None:
     unknown = set(arguments) - allowed

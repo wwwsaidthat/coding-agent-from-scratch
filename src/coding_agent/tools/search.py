@@ -30,6 +30,8 @@ EXCLUDED_GLOBS = (
     "!.venv/**",
     "!venv/**",
     "!node_modules/**",
+    "!.agent-images/**",
+    "!.agent-files/**",
     "!**/.env*",
 )
 

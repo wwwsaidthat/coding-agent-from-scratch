@@ -72,6 +72,7 @@ class ConversationTests(unittest.TestCase):
         conversation = Conversation("old prompt")
         conversation.set_system_prompt(prompt)
         system = conversation.api_messages()[0]["content"]
+        self.assertIn("15. Treat the following runtime model identity", system)
         self.assertIn("primary coding model", system)
         self.assertIn("deepseek-v4-pro", system)
         self.assertIn("used only", system)

@@ -2,13 +2,16 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from coding_agent.tools.base import ToolExecutionError
-from coding_agent.tools.external import AnalyzeImageTool, WebSearchTool
+from coding_agent.cli import build_registry
+from coding_agent.config import Settings
+from coding_agent.tools.external import AnalyzeImageTool, AnalyzePdfTool, WebSearchTool
 from coding_agent.tools.filesystem import (
     ListFilesTool,
     MultiEditTool,
@@ -249,6 +252,54 @@ class ExternalAndPlanningToolTests(unittest.TestCase):
         self.assertEqual(content[0]["type"], "image_url")
         self.assertTrue(content[0]["image_url"]["url"].startswith("data:image/png;base64,"))
 
+    def test_approved_pdf_renders_ordered_pages_for_qwen(self) -> None:
+        pdf = self.root / "sample.pdf"
+        pdf.write_bytes(b"%PDF-1.7\nlocal-test")
+        client = FakeQwenClient()
+        proposals = []
+        with (
+            patch("coding_agent.tools.external._pdf_page_count", return_value=2),
+            patch(
+                "coding_agent.tools.external._render_pdf_pages",
+                return_value=[b"\xff\xd8\xffpage-one", b"\xff\xd8\xffpage-two"],
+            ),
+        ):
+            result = AnalyzePdfTool(
+                self.paths,
+                client,
+                lambda proposal: proposals.append(proposal) or True,
+            ).run({"path": "sample.pdf", "prompt": "summarize it"})
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.data["page_count"], 2)
+        self.assertEqual(proposals[0]["details"]["page_count"], 2)
+        content = client.payloads[0]["messages"][0]["content"]
+        page_images = [item for item in content if item["type"] == "image_url"]
+        self.assertEqual(len(page_images), 2)
+        self.assertTrue(
+            all(
+                item["image_url"]["url"].startswith("data:image/jpeg;base64,")
+                for item in page_images
+            )
+        )
+        self.assertIn("summarize it", content[-1]["text"])
+
+    def test_rejected_pdf_is_not_rendered_or_sent_to_qwen(self) -> None:
+        pdf = self.root / "sample.pdf"
+        pdf.write_bytes(b"%PDF-1.7\nlocal-test")
+        client = FakeQwenClient()
+        with (
+            patch("coding_agent.tools.external._pdf_page_count", return_value=1),
+            patch("coding_agent.tools.external._render_pdf_pages") as render,
+            self.assertRaises(ToolExecutionError) as caught,
+        ):
+            AnalyzePdfTool(self.paths, client, lambda proposal: False).run(
+                {"path": "sample.pdf", "prompt": "summarize it"}
+            )
+        self.assertEqual(caught.exception.code, "ExternalActionRejected")
+        render.assert_not_called()
+        self.assertFalse(client.payloads)
+
     def test_plan_validation_and_callback(self) -> None:
         stored = []
         tool = UpdatePlanTool(lambda payload: stored.append(payload) or payload)
@@ -289,6 +340,16 @@ class RegistryAndCommandTests(unittest.TestCase):
         result = registry.execute("list_files", "not-json")
         self.assertFalse(result.success)
         self.assertEqual(result.metadata["code"], "InvalidJSON")
+
+    def test_configured_registry_exposes_pdf_analysis(self) -> None:
+        settings = Settings(
+            api_key="test-only",
+            qwen_api_key="test-only",
+            qwen_base_url="https://qwen.test/v1",
+        )
+        registry = build_registry(self.root, 5, settings=settings)
+        names = [definition["function"]["name"] for definition in registry.definitions]
+        self.assertIn("analyze_pdf", names)
 
     def test_allowed_command_runs_without_shell(self) -> None:
         result = self.command.run({"argv": ["python3", "--version"]})

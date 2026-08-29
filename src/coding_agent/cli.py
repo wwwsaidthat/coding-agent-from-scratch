@@ -14,6 +14,7 @@ from .models import DeepSeekChatModel, ModelAPIError, ScriptedDemoModel
 from .prompts import system_prompt_for_models
 from .tools import (
     AnalyzeImageTool,
+    AnalyzePdfTool,
     FindFilesTool,
     ListFilesTool,
     MultiEditTool,
@@ -103,6 +104,7 @@ def build_registry(
             [
                 WebSearchTool(external, approval_handler),
                 AnalyzeImageTool(paths, external, approval_handler),
+                AnalyzePdfTool(paths, external, approval_handler),
             ]
         )
     return ToolRegistry(tools)

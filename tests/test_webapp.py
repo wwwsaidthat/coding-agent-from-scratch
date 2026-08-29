@@ -123,7 +123,8 @@ class WebApplicationTests(unittest.TestCase):
             self.assertIn("LOOPCODER", html)
             self.assertIn('id="session-list"', html)
             self.assertIn('id="approval-card"', html)
-            self.assertIn('id="image-input"', html)
+            self.assertIn('id="attachment-input"', html)
+            self.assertIn("application/pdf", html)
             self.assertIn('id="run-plan"', html)
             self.assertIn('id="memory-checkpoint"', html)
             self.assertLess(html.index('id="conversation-memory-title"'), html.index('id="activity-title"'))
@@ -281,6 +282,29 @@ class WebApplicationTests(unittest.TestCase):
         current = self.get_json(f"/api/sessions/{session['id']}")
         self.assertEqual(current["messages"][0]["attachments"], [uploaded["path"]])
 
+    def test_pdf_upload_is_bound_to_session_and_message(self) -> None:
+        session = self.post_json(
+            "/api/sessions",
+            {"workspace": str(self.workspace), "demo": True, "max_steps": 10},
+        )
+        pdf = b"%PDF-1.7\nlocal-pdf"
+        uploaded = self.post_json(
+            f"/api/sessions/{session['id']}/pdfs",
+            {
+                "filename": "paper.pdf",
+                "data_base64": base64.b64encode(pdf).decode("ascii"),
+            },
+        )
+        self.assertTrue(uploaded["path"].startswith(f".agent-files/{session['id']}/"))
+        self.assertEqual(uploaded["mime_type"], "application/pdf")
+        run = self.post_json(
+            f"/api/sessions/{session['id']}/messages",
+            {"content": "summarize this", "attachments": [uploaded["path"]]},
+        )
+        run = self.wait_for_run(run)
+        current = self.get_json(f"/api/sessions/{session['id']}")
+        self.assertEqual(current["messages"][0]["attachments"], [uploaded["path"]])
+
     def test_delete_session_removes_messages_traces_and_uploaded_images(self) -> None:
         session = self.post_json(
             "/api/sessions",
@@ -295,24 +319,37 @@ class WebApplicationTests(unittest.TestCase):
                 ).decode("ascii"),
             },
         )
+        uploaded_pdf = self.post_json(
+            f"/api/sessions/{session['id']}/pdfs",
+            {
+                "filename": "delete-me.pdf",
+                "data_base64": base64.b64encode(b"%PDF-1.7\ndelete-me").decode("ascii"),
+            },
+        )
         run = self.post_json(
             f"/api/sessions/{session['id']}/messages",
-            {"content": "temporary conversation", "attachments": [uploaded["path"]]},
+            {
+                "content": "temporary conversation",
+                "attachments": [uploaded["path"], uploaded_pdf["path"]],
+            },
         )
         run = self.wait_for_run(run)
         self.assertEqual(run["status"], "completed")
         session_file = self.workspace / ".coding-agent" / "sessions" / f"{session['id']}.json"
         trace_file = self.workspace / ".coding-agent" / "traces" / f"{run['id']}.json"
         image_file = self.workspace / uploaded["path"]
+        pdf_file = self.workspace / uploaded_pdf["path"]
         self.assertTrue(session_file.is_file())
         self.assertTrue(trace_file.is_file())
         self.assertTrue(image_file.is_file())
+        self.assertTrue(pdf_file.is_file())
 
         deleted = self.delete_json(f"/api/sessions/{session['id']}")
         self.assertTrue(deleted["deleted"])
         self.assertFalse(session_file.exists())
         self.assertFalse(trace_file.exists())
         self.assertFalse(image_file.exists())
+        self.assertFalse(pdf_file.exists())
         self.assertFalse(
             any(
                 item["id"] == session["id"]

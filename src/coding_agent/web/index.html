@@ -141,13 +141,13 @@
           </div>
 
           <div class="attachment-bar">
-            <label class="image-picker" for="image-input">
-              <span aria-hidden="true">▧</span> 添加图片
+            <label class="attachment-picker" for="attachment-input">
+              <span aria-hidden="true">▧</span> 添加图片 / PDF
             </label>
-            <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
-            <span class="vision-state" id="vision-state">视觉模型未检查</span>
+            <input id="attachment-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,.pdf" multiple hidden>
+            <span class="vision-state" id="vision-state">Qwen 文件理解未检查</span>
           </div>
-          <div class="pending-images" id="pending-images" aria-live="polite"></div>
+          <div class="pending-attachments" id="pending-attachments" aria-live="polite"></div>
 
           <div class="prompt-presets" aria-label="Prompt 示例">
             <button type="button" class="preset" data-prompt="请阅读当前项目，修复所有失败的测试；只修改必要代码，完成后运行全部测试并总结修改。">修复失败测试</button>
