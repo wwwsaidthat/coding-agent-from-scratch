@@ -48,6 +48,14 @@ class ModelParsingTests(unittest.TestCase):
 
 
 class ConversationTests(unittest.TestCase):
+    def test_context_tiers_use_round_seventy_eighty_ninety_thresholds(self) -> None:
+        self.assertEqual(Conversation._context_tier(0.69), "normal")
+        self.assertEqual(Conversation._context_tier(0.70), "deterministic_cleanup")
+        self.assertEqual(Conversation._context_tier(0.79), "deterministic_cleanup")
+        self.assertEqual(Conversation._context_tier(0.80), "semantic_summary")
+        self.assertEqual(Conversation._context_tier(0.89), "semantic_summary")
+        self.assertEqual(Conversation._context_tier(0.90), "emergency_compaction")
+
     @staticmethod
     def _tool_call(call_id: str, name: str, arguments: dict) -> dict:
         return {

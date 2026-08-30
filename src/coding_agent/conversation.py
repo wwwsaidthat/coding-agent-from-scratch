@@ -11,6 +11,11 @@ from typing import Any, Mapping, Sequence
 from .context_compression import HISTORICAL_TOOL_RESULT_LIMIT, compress_tool_result
 
 
+CONTEXT_CLEANUP_THRESHOLD = 0.70
+CONTEXT_SUMMARY_THRESHOLD = 0.80
+CONTEXT_EMERGENCY_THRESHOLD = 0.90
+
+
 @dataclass(slots=True)
 class MemoryCheckpoint:
     """Bounded, structured task memory kept independently of chat history."""
@@ -323,7 +328,7 @@ class Conversation:
         tool_rounds = self._total_tool_rounds()
         return (
             self._milestone_pending
-            and self.context_pressure() >= 0.82
+            and self.context_pressure() >= CONTEXT_SUMMARY_THRESHOLD
             and tool_rounds > self._last_summary_tool_rounds
         )
 
@@ -542,26 +547,31 @@ class Conversation:
         budget = self._prompt_token_budget()
         initial_pressure = self._request_token_estimate(retained, 0, layers) / budget
         compacted_outputs = 0
-        if initial_pressure >= 0.70:
+        if initial_pressure >= CONTEXT_CLEANUP_THRESHOLD:
             compacted_outputs = self._compact_historical_tool_outputs(retained)
 
         notes: list[str] = []
         compacted_rounds = 0
-        if initial_pressure >= 0.92:
+        if initial_pressure >= CONTEXT_EMERGENCY_THRESHOLD:
             while len(retained) > 1:
                 retained.pop(0)
                 dropped += 1
-        elif initial_pressure >= 0.82:
+        elif initial_pressure >= CONTEXT_SUMMARY_THRESHOLD:
             while len(retained) > 1:
                 if self._request_token_estimate(retained, dropped, layers) <= round(
-                    budget * 0.82
+                    budget * CONTEXT_SUMMARY_THRESHOLD
                 ):
                     break
                 retained.pop(0)
                 dropped += 1
 
-        target = round(budget * (0.92 if initial_pressure >= 0.92 else 0.82))
-        while initial_pressure >= 0.82:
+        target_threshold = (
+            CONTEXT_EMERGENCY_THRESHOLD
+            if initial_pressure >= CONTEXT_EMERGENCY_THRESHOLD
+            else CONTEXT_SUMMARY_THRESHOLD
+        )
+        target = round(budget * target_threshold)
+        while initial_pressure >= CONTEXT_SUMMARY_THRESHOLD:
             ranges = [
                 (exchange_index, start, end)
                 for exchange_index, exchange in enumerate(retained)
@@ -569,12 +579,16 @@ class Conversation:
             ]
             if len(ranges) <= 2:
                 break
-            if initial_pressure < 0.92 and self._request_token_estimate(
-                retained,
-                dropped,
-                layers,
-                tool_summary="\n".join(notes),
-            ) <= target:
+            if (
+                initial_pressure < CONTEXT_EMERGENCY_THRESHOLD
+                and self._request_token_estimate(
+                    retained,
+                    dropped,
+                    layers,
+                    tool_summary="\n".join(notes),
+                )
+                <= target
+            ):
                 break
             exchange_index, start, end = ranges[0]
             removed = retained[exchange_index][start:end]
@@ -851,11 +865,11 @@ class Conversation:
 
     @staticmethod
     def _context_tier(pressure: float) -> str:
-        if pressure < 0.70:
+        if pressure < CONTEXT_CLEANUP_THRESHOLD:
             return "normal"
-        if pressure < 0.82:
+        if pressure < CONTEXT_SUMMARY_THRESHOLD:
             return "deterministic_cleanup"
-        if pressure < 0.92:
+        if pressure < CONTEXT_EMERGENCY_THRESHOLD:
             return "semantic_summary"
         return "emergency_compaction"
 
