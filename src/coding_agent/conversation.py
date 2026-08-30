@@ -200,7 +200,7 @@ class Conversation:
         user_task: str | None = None,
         *,
         max_context_chars: int = 120_000,
-        max_context_tokens: int = 64_000,
+        max_context_tokens: int = 96_000,
         response_reserve_tokens: int = 8_000,
     ) -> None:
         if max_context_chars <= 0:
@@ -283,6 +283,12 @@ class Conversation:
         if not isinstance(system_prompt, str) or not system_prompt.strip():
             raise ValueError("System prompt must not be empty")
         self._system_prompt = system_prompt
+
+    def set_max_context_tokens(self, max_context_tokens: int) -> None:
+        """Apply the current runtime window to a restored conversation."""
+        if max_context_tokens <= self.response_reserve_tokens:
+            raise ValueError("max_context_tokens must exceed the response reserve")
+        self.max_context_tokens = max_context_tokens
 
     def set_tool_definitions(
         self, tool_definitions: Sequence[Mapping[str, Any]]
@@ -480,7 +486,7 @@ class Conversation:
             raise ValueError("Conversation state has invalid exchanges")
 
         restored_max_tokens = cls._state_positive_int(
-            state.get("max_context_tokens"), 64_000
+            state.get("max_context_tokens"), 96_000
         )
         restored_reserve = cls._state_nonnegative_int(
             state.get("response_reserve_tokens"), 8_000

@@ -116,7 +116,7 @@ class WebApplicationTests(unittest.TestCase):
         self.assertTrue(self.get_json("/api/health")["ok"])
         config = self.get_json("/api/config")
         self.assertFalse(config["api_configured"])
-        self.assertEqual(config["context_budget_tokens"], 64_000)
+        self.assertEqual(config["context_budget_tokens"], 96_000)
         self.assertEqual(config["default_workspace"], str(self.workspace.resolve()))
         with urlopen(self.base_url + "/", timeout=3) as response:
             html = response.read().decode("utf-8")

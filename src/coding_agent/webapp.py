@@ -852,6 +852,7 @@ class RunStore:
                     continue
                 conversation = Conversation.from_state(payload["conversation"])
                 conversation.set_system_prompt(self._system_prompt())
+                conversation.set_max_context_tokens(self.settings.context_tokens)
                 conversation.abort_turn(
                     "上一轮因服务重启中断，请根据当前项目状态继续。"
                 )
