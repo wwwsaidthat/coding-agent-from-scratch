@@ -304,16 +304,27 @@ python3 -m unittest discover -s tests -v
 - 两轮对话的上下文复用、本地持久化和服务重启恢复；
 - Trace 请求快照、耗时、Token 聚合与最终测试结果。
 
-## 视频演示用示例任务
+## 视频演示方案
 
-`examples/bugfix_demo` 是一个故意带有失败测试的小项目，可以用来演示 Agent 阅读代码、修改文件并运行测试：
+演示采用“Agent 构建 Agent”的两轮任务：被考核和提交的项目是 **LoopCoder**，它在一个独立工作区中完成 **MiniAgent** 项目；MiniAgent 只是 LoopCoder 的演示任务产物。
 
-```bash
-python3 main.py --workspace examples/bugfix_demo \
-  "修复 slugify 函数，使所有测试通过；完成后运行全部测试并总结修改"
+### 第一轮：完成 MiniAgent 核心
+
+工作区预先提供项目骨架、功能要求和验收测试。LoopCoder 先阅读项目、运行初始测试，然后实现对话历史、工具注册与本地执行、tool call 解析、Agent 循环、最大步数和错误处理，最后运行全部测试。参考 Prompt：
+
+```text
+当前工作区是一个待完善的 MiniAgent 项目。请根据 README 中的要求检查项目，先运行初始测试并制定计划，再自行实现模型—工具—结果循环、read_file、write_file、run_command、对话历史、错误处理和最大步数终止。不使用任何 Agent 框架或 SDK，不要通过修改测试绕过问题。完成后运行全部测试并总结。
 ```
 
-示例说明见 [`examples/bugfix_demo/README.md`](examples/bugfix_demo/README.md)。
+### 第二轮：根据参考图继续设计前端
+
+在同一会话中上传界面参考图，让 LoopCoder 复用上一轮的项目上下文，分析图片的配色、排版、间距和组件风格，在不破坏现有交互的前提下修改 MiniAgent 前端。参考 Prompt：
+
+```text
+继续完善刚才的 MiniAgent 项目。请读取附件中的界面参考图，提取它的配色、排版、卡片、间距和按钮风格，并据此重新设计现有前端。只借鉴视觉语言，不复制图片中的品牌、文字或 Logo；保留现有 DOM ID、接口和交互功能，避免无关的后端改动。完成后运行相关测试并总结设计选择。
+```
+
+两轮演示可同时呈现真实编程任务、连续对话记忆、图片理解、本地工具执行、Diff 审批和测试验证。演示视频应保留 Prompt、关键 Action / Observation、修改确认和最终测试结果；等待过程可剪辑或加速。
 
 ## 安全边界
 
