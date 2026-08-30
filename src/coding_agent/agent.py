@@ -45,7 +45,7 @@ class Agent:
         *,
         max_steps: int = 20,
         max_context_chars: int = 120_000,
-        max_context_tokens: int = 96_000,
+        max_context_tokens: int = 192_000,
         on_event: EventHandler | None = None,
         should_stop: StopChecker | None = None,
     ) -> None:

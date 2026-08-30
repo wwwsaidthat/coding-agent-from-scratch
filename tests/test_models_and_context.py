@@ -82,11 +82,11 @@ class ConversationTests(unittest.TestCase):
         conversation = Conversation("system", max_context_tokens=64_000)
         restored = Conversation.from_state(conversation.to_state())
 
-        restored.set_max_context_tokens(96_000)
+        restored.set_max_context_tokens(192_000)
 
         stats = restored.context_stats()
-        self.assertEqual(stats["max_context_tokens"], 96_000)
-        self.assertEqual(stats["budget_tokens"], 85_120)
+        self.assertEqual(stats["max_context_tokens"], 192_000)
+        self.assertEqual(stats["budget_tokens"], 178_240)
 
     def test_context_trimming_keeps_tool_pairs_together(self) -> None:
         conversation = Conversation(

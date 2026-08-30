@@ -200,7 +200,7 @@ class Conversation:
         user_task: str | None = None,
         *,
         max_context_chars: int = 120_000,
-        max_context_tokens: int = 96_000,
+        max_context_tokens: int = 192_000,
         response_reserve_tokens: int = 8_000,
     ) -> None:
         if max_context_chars <= 0:
@@ -486,7 +486,7 @@ class Conversation:
             raise ValueError("Conversation state has invalid exchanges")
 
         restored_max_tokens = cls._state_positive_int(
-            state.get("max_context_tokens"), 96_000
+            state.get("max_context_tokens"), 192_000
         )
         restored_reserve = cls._state_nonnegative_int(
             state.get("response_reserve_tokens"), 8_000

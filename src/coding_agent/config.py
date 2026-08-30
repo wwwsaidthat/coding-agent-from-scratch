@@ -60,7 +60,7 @@ class Settings:
     max_steps: int = 20
     api_timeout: int = 90
     command_timeout: int = 30
-    context_tokens: int = 96_000
+    context_tokens: int = 192_000
     qwen_api_key: str | None = None
     qwen_base_url: str = (
         "https://YOUR_WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
@@ -88,7 +88,7 @@ class Settings:
             max_steps=_positive_int("CODING_AGENT_MAX_STEPS", 20),
             api_timeout=_positive_int("CODING_AGENT_API_TIMEOUT", 90),
             command_timeout=_positive_int("CODING_AGENT_COMMAND_TIMEOUT", 30),
-            context_tokens=_positive_int("CODING_AGENT_CONTEXT_TOKENS", 96_000),
+            context_tokens=_positive_int("CODING_AGENT_CONTEXT_TOKENS", 192_000),
             qwen_api_key=os.getenv("QWEN_API_KEY"),
             qwen_base_url=os.getenv(
                 "QWEN_BASE_URL",
