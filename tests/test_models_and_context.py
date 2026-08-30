@@ -179,6 +179,45 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(stats["compacted_tool_rounds"], 4)
         self.assertEqual(stats["retained_tool_rounds"], 2)
 
+    def test_seventy_percent_tier_compacts_old_outputs_before_dropping_rounds(self) -> None:
+        conversation = Conversation(
+            "system",
+            max_context_tokens=13_000,
+            response_reserve_tokens=0,
+        )
+        conversation.start_user_turn("inspect several large files")
+        for index in range(6):
+            call = self._tool_call(
+                f"call-{index}", "read_file", {"path": f"file-{index}.py"}
+            )
+            conversation.add_tool_turn(
+                {"role": "assistant", "content": None, "tool_calls": [call]},
+                [
+                    self._tool_message(
+                        f"call-{index}",
+                        {"success": True, "data": "line\n" * 800},
+                    )
+                ],
+            )
+        conversation.add_final("inspection complete")
+
+        stats = conversation.context_stats()
+        self.assertEqual(stats["context_tier"], "deterministic_cleanup")
+        self.assertGreater(stats["compacted_tool_outputs"], 0)
+        self.assertEqual(stats["dropped_exchanges"], 0)
+        messages = conversation.api_messages()
+        call_ids = {
+            call["id"]
+            for message in messages
+            for call in message.get("tool_calls", [])
+        }
+        result_ids = {
+            message["tool_call_id"]
+            for message in messages
+            if message.get("role") == "tool"
+        }
+        self.assertEqual(call_ids, result_ids)
+
     def test_conversation_state_round_trip_and_context_stats(self) -> None:
         conversation = Conversation(
             "system",

@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
-import json
 import time
 from typing import Any, Callable, Mapping
 
 from .conversation import Conversation
+from .context_compression import HISTORICAL_TOOL_RESULT_LIMIT, compress_tool_result
 from .models import ChatModel, ModelResponse, ToolCall
 from .prompts import SYSTEM_PROMPT
 from .tools.registry import ToolRegistry
@@ -16,7 +15,6 @@ from .tools.registry import ToolRegistry
 
 EventHandler = Callable[[str, Mapping[str, Any]], None]
 StopChecker = Callable[[], bool]
-MAX_CONTEXT_TOOL_RESULT_CHARS = 16_000
 
 
 class AgentError(RuntimeError):
@@ -127,6 +125,7 @@ class Agent:
                 if not final:
                     raise AgentError("Model returned neither content nor tool calls")
                 conversation.add_final(final)
+                self._maybe_create_semantic_summary(conversation, step)
                 self._emit("completed", {"step": step, "output": final})
                 return AgentResult(
                     final_output=final,
@@ -173,8 +172,15 @@ class Agent:
                     tool_started = time.perf_counter()
                     result = self.tools.execute(call.name, call.arguments)
                     result_json = result.to_json()
-                    context_result_json, compression = self._compress_tool_result(
-                        result_json
+                    reference = (
+                        self.tools.archive_result(call.name, result_json)
+                        if len(result_json) > HISTORICAL_TOOL_RESULT_LIMIT
+                        else None
+                    )
+                    context_result_json, compression = compress_tool_result(
+                        call.name,
+                        result_json,
+                        reference=reference,
                     )
                     self._emit(
                         "tool_finish",
@@ -194,7 +200,7 @@ class Agent:
                     )
 
                 if repeated_calls >= 3:
-                    context_result_json, _ = self._compress_tool_result(result_json)
+                    context_result_json, _ = compress_tool_result(call.name, result_json)
 
                 tool_messages.append(
                     {
@@ -204,6 +210,7 @@ class Agent:
                     }
                 )
             conversation.add_tool_turn(assistant_message, tool_messages)
+            self._maybe_create_semantic_summary(conversation, step)
 
         raise AgentLimitError(
             f"Agent reached the maximum of {self.max_steps} model steps without finishing"
@@ -263,69 +270,50 @@ class Agent:
             for message in messages
         ]
 
-    @staticmethod
-    def _compress_tool_result(result_json: str) -> tuple[str, dict[str, Any]]:
-        original_chars = len(result_json)
-        digest = hashlib.sha256(result_json.encode("utf-8")).hexdigest()
-        if original_chars <= MAX_CONTEXT_TOOL_RESULT_CHARS:
-            return result_json, {
-                "truncated": False,
-                "original_chars": original_chars,
-                "returned_chars": original_chars,
-                "sha256": digest,
-                "strategy": "none",
-            }
-
-        try:
-            original = json.loads(result_json)
-        except json.JSONDecodeError:
-            original = {"success": False, "error": result_json}
-        if not isinstance(original, Mapping):
-            original = {"success": True, "data": original}
-
-        value_key = "data" if original.get("success") is True else "error"
-        value = original.get(value_key)
-        if isinstance(value, str):
-            rendered = value
-            data_type = "string"
-        else:
-            rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-            data_type = type(value).__name__
-        preview_budget = MAX_CONTEXT_TOOL_RESULT_CHARS - 3_000
-        head_size = max(1, round(preview_budget * 0.72))
-        tail_size = max(1, preview_budget - head_size)
-        preview = (
-            rendered[:head_size]
-            + "\n… tool output compacted for model context …\n"
-            + rendered[-tail_size:]
-        )
-        metadata = original.get("metadata")
-        compacted: dict[str, Any] = {
-            "success": original.get("success") is True,
-            value_key: preview,
-            "metadata": {
-                **(dict(metadata) if isinstance(metadata, Mapping) else {}),
-                "context_compression": {
-                    "truncated": True,
-                    "original_chars": original_chars,
-                    "returned_chars": 0,
-                    "sha256": digest,
-                    "strategy": "head_tail",
-                    "original_data_type": data_type,
-                    "notice": (
-                        "Full output is retained in the local execution trace. "
-                        "Re-read or rerun for exact details."
-                    ),
-                },
+    def _maybe_create_semantic_summary(
+        self, conversation: Conversation, step: int
+    ) -> None:
+        if not conversation.semantic_summary_due():
+            return
+        messages = conversation.semantic_summary_request()
+        started = time.perf_counter()
+        self._emit(
+            "semantic_summary_request",
+            {
+                "step": step,
+                "message_count": len(messages),
+                "request_messages": self._trace_messages(messages),
             },
-        }
-        serialized = ""
-        for _ in range(3):
-            serialized = json.dumps(compacted, ensure_ascii=False, separators=(",", ":"))
-            compacted["metadata"]["context_compression"]["returned_chars"] = len(
-                serialized
+        )
+        try:
+            response = self.model.complete(messages, [])
+            if response.tool_calls or not (response.content or "").strip():
+                raise ValueError("Summary model did not return a JSON text response")
+            conversation.observe_usage(
+                messages,
+                response.metadata.get("usage"),
+                include_tools=False,
             )
-        serialized = json.dumps(compacted, ensure_ascii=False, separators=(",", ":"))
-        compression = dict(compacted["metadata"]["context_compression"])
-        compression["returned_chars"] = len(serialized)
-        return serialized, compression
+            conversation.apply_semantic_summary(response.content or "")
+            self._emit(
+                "semantic_summary_response",
+                {
+                    "step": step,
+                    "duration_ms": round((time.perf_counter() - started) * 1_000, 2),
+                    "model": response.metadata.get("model"),
+                    "request_id": response.metadata.get("id"),
+                    "usage": response.metadata.get("usage"),
+                    "summary": conversation.to_state().get("semantic_summary"),
+                },
+            )
+        except Exception as exc:
+            conversation.mark_semantic_summary_attempted()
+            self._emit(
+                "semantic_summary_error",
+                {
+                    "step": step,
+                    "duration_ms": round((time.perf_counter() - started) * 1_000, 2),
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )

@@ -717,7 +717,7 @@ class RunStore:
     def _record_metrics_locked(
         self, record: RunRecord, event_type: str, payload: Mapping[str, Any]
     ) -> None:
-        if event_type == "model_response":
+        if event_type in {"model_response", "semantic_summary_response"}:
             usage = payload.get("usage")
             if isinstance(usage, Mapping):
                 for name, value in usage.items():

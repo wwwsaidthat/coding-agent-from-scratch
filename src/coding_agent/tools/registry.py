@@ -6,15 +6,27 @@ import json
 from typing import Any, Iterable, Mapping
 
 from .base import Tool, ToolExecutionError, ToolResult
+from .result_archive import ToolResultArchive
 
 
 class ToolRegistry:
-    def __init__(self, tools: Iterable[Tool]) -> None:
+    def __init__(
+        self,
+        tools: Iterable[Tool],
+        *,
+        result_archive: ToolResultArchive | None = None,
+    ) -> None:
         self._tools: dict[str, Tool] = {}
+        self._result_archive = result_archive
         for tool in tools:
             if tool.name in self._tools:
                 raise ValueError(f"Duplicate tool name: {tool.name}")
             self._tools[tool.name] = tool
+
+    def archive_result(self, tool_name: str, result_json: str) -> dict[str, Any] | None:
+        if self._result_archive is None:
+            return None
+        return self._result_archive.store(tool_name, result_json)
 
     @property
     def definitions(self) -> list[dict[str, Any]]:

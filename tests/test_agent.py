@@ -14,6 +14,7 @@ from coding_agent.conversation import Conversation
 from coding_agent.models import ModelResponse, ScriptedDemoModel, ToolCall
 from coding_agent.tools.base import ToolResult
 from coding_agent.tools.registry import ToolRegistry
+from coding_agent.tools.result_archive import ReadToolResultTool, ToolResultArchive
 
 
 class AlwaysCallsToolModel:
@@ -73,6 +74,56 @@ class LargeOutputModel:
                 tool_calls=(ToolCall("large-1", "large_output", "{}"),),
             )
         return ModelResponse(content="large output handled")
+
+
+class MilestoneTestTool:
+    name = "run_command"
+    description = "Return a large successful test output."
+    parameters = {"type": "object", "properties": {"argv": {"type": "array"}}}
+
+    def run(self, arguments):
+        del arguments
+        return ToolResult.ok("test output\n" + "x" * 8_000, exit_code=0)
+
+
+class MilestoneSummaryModel:
+    def __init__(self):
+        self.normal_calls = 0
+        self.summary_calls = 0
+
+    def complete(self, messages, tools):
+        if not tools:
+            self.summary_calls += 1
+            return ModelResponse(
+                content=json.dumps(
+                    {
+                        "goal": "validate milestone summarization",
+                        "constraints": [],
+                        "decisions": ["run focused tests"],
+                        "completed_actions": ["focused tests passed"],
+                        "modified_files": [],
+                        "important_code_facts": ["test output was large"],
+                        "tests": ["python3 -m unittest passed"],
+                        "failed_attempts": [],
+                        "blockers": [],
+                        "next_action": "return the final answer",
+                    }
+                ),
+                metadata={"usage": {"prompt_tokens": 500, "completion_tokens": 80}},
+            )
+        self.normal_calls += 1
+        if self.normal_calls == 1:
+            return ModelResponse(
+                content="运行测试形成阶段检查点。",
+                tool_calls=(
+                    ToolCall(
+                        "test-1",
+                        "run_command",
+                        '{"argv":["python3","-m","unittest"]}',
+                    ),
+                ),
+            )
+        return ModelResponse(content="milestone complete")
 
 
 class AgentLoopTests(unittest.TestCase):
@@ -189,6 +240,60 @@ class AgentLoopTests(unittest.TestCase):
         finish = next(payload for event, payload in events if event == "tool_finish")
         self.assertGreater(len(finish["result"]), 40_000)
         self.assertTrue(finish["context_compression"]["truncated"])
+
+    def test_large_result_has_local_reference_and_can_be_recalled(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = ToolResultArchive(Path(temporary))
+            registry = ToolRegistry(
+                [LargeOutputTool(), ReadToolResultTool(archive)],
+                result_archive=archive,
+            )
+            model = LargeOutputModel()
+            Agent(model, registry).run("handle and archive a large result")
+
+            tool_message = next(
+                message for message in model.requests[1] if message.get("role") == "tool"
+            )
+            compression = json.loads(tool_message["content"])["metadata"][
+                "context_compression"
+            ]
+            result_id = compression["result_id"]
+            recalled = registry.execute(
+                "read_tool_result",
+                json.dumps({"result_id": result_id, "start_char": 0, "max_chars": 100}),
+            )
+            self.assertTrue(recalled.success)
+            self.assertTrue(recalled.data.startswith('{"success": true, "data": "BEGIN-'))
+
+    def test_high_pressure_milestone_creates_semantic_summary(self) -> None:
+        model = MilestoneSummaryModel()
+        events = []
+        conversation = Conversation(
+            "system",
+            max_context_tokens=1_200,
+            response_reserve_tokens=0,
+        )
+        agent = Agent(
+            model,
+            ToolRegistry([MilestoneTestTool()]),
+            max_steps=4,
+            on_event=lambda event, payload: events.append((event, payload)),
+        )
+
+        result = agent.run("run a focused test milestone", conversation=conversation)
+
+        self.assertEqual(result.final_output, "milestone complete")
+        self.assertEqual(model.summary_calls, 1)
+        self.assertTrue(conversation.context_stats()["semantic_summary_available"])
+        restored = Conversation.from_state(conversation.to_state())
+        summary_layers = [
+            message["content"]
+            for message in restored.api_messages()
+            if message.get("role") == "system" and "Lossy milestone" in message["content"]
+        ]
+        self.assertEqual(len(summary_layers), 1)
+        self.assertIn("focused tests passed", summary_layers[0])
+        self.assertIn("semantic_summary_response", {event for event, _ in events})
 
     def test_cli_demo_runs_without_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

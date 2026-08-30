@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
+from .context_compression import HISTORICAL_TOOL_RESULT_LIMIT, compress_tool_result
+
 
 @dataclass(slots=True)
 class MemoryCheckpoint:
@@ -131,6 +133,64 @@ class TokenCalibration:
         )
 
 
+@dataclass(slots=True)
+class SemanticSummary:
+    """Lossy milestone summary generated only when context pressure warrants it."""
+
+    goal: str = ""
+    constraints: list[str] = field(default_factory=list)
+    decisions: list[str] = field(default_factory=list)
+    completed_actions: list[str] = field(default_factory=list)
+    modified_files: list[str] = field(default_factory=list)
+    important_code_facts: list[str] = field(default_factory=list)
+    tests: list[str] = field(default_factory=list)
+    failed_attempts: list[str] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    next_action: str = ""
+
+    _LIST_FIELDS = (
+        "constraints",
+        "decisions",
+        "completed_actions",
+        "modified_files",
+        "important_code_facts",
+        "tests",
+        "failed_attempts",
+        "blockers",
+    )
+
+    def to_state(self) -> dict[str, Any]:
+        return {
+            "goal": self.goal,
+            **{name: list(getattr(self, name)) for name in self._LIST_FIELDS},
+            "next_action": self.next_action,
+        }
+
+    @classmethod
+    def from_state(cls, state: Any) -> "SemanticSummary":
+        if not isinstance(state, Mapping):
+            raise ValueError("Semantic summary must be a JSON object")
+        summary = cls()
+        for scalar in ("goal", "next_action"):
+            value = state.get(scalar, "")
+            if not isinstance(value, str):
+                raise ValueError(f"Semantic summary field {scalar} must be a string")
+            setattr(summary, scalar, " ".join(value.split())[:2_000])
+        for name in cls._LIST_FIELDS:
+            values = state.get(name, [])
+            if not isinstance(values, list):
+                raise ValueError(f"Semantic summary field {name} must be an array")
+            cleaned: list[str] = []
+            for value in values[:24]:
+                if isinstance(value, str) and value.strip():
+                    cleaned.append(" ".join(value.split())[:600])
+            setattr(summary, name, cleaned)
+        return summary
+
+    def render(self) -> str:
+        return json.dumps(self.to_state(), ensure_ascii=False, indent=2)
+
+
 class Conversation:
     """Store complete user exchanges while enforcing a simple context budget."""
 
@@ -156,6 +216,9 @@ class Conversation:
         self._active = False
         self._checkpoint = MemoryCheckpoint()
         self._token_calibration = TokenCalibration()
+        self._semantic_summary: SemanticSummary | None = None
+        self._milestone_pending = False
+        self._last_summary_tool_rounds = 0
         self._tool_definitions: list[dict[str, Any]] = []
         self.max_context_chars = max_context_chars
         self.max_context_tokens = max_context_tokens
@@ -184,7 +247,18 @@ class Conversation:
         self._exchanges[-1].extend(
             [dict(assistant_message), *(dict(message) for message in tool_messages)]
         )
+        before_completed = set(self._checkpoint.completed)
+        before_tests = set(self._checkpoint.tests)
+        before_modified = set(self._checkpoint.modified_files)
+        before_decisions = set(self._checkpoint.decisions)
         self._update_checkpoint_from_tools(assistant_message, tool_messages)
+        if (
+            set(self._checkpoint.completed) - before_completed
+            or set(self._checkpoint.tests) - before_tests
+            or set(self._checkpoint.modified_files) - before_modified
+            or set(self._checkpoint.decisions) - before_decisions
+        ):
+            self._milestone_pending = True
 
     def add_final(self, content: str) -> None:
         self._require_active()
@@ -192,6 +266,7 @@ class Conversation:
         self._checkpoint.remember(
             "completed", "Outcome: " + self._message_text(content, 560)
         )
+        self._milestone_pending = True
         self._active = False
 
     def abort_turn(self, content: str) -> None:
@@ -221,6 +296,8 @@ class Conversation:
         self,
         request_messages: Sequence[Mapping[str, Any]],
         usage: Any,
+        *,
+        include_tools: bool = True,
     ) -> None:
         """Learn from provider usage without depending on a provider tokenizer."""
         if not isinstance(usage, Mapping):
@@ -232,11 +309,56 @@ class Conversation:
             or prompt_tokens <= 0
         ):
             return
-        raw = self._raw_token_estimate([*request_messages, *self._tool_definitions])
+        values = [*request_messages, *self._tool_definitions] if include_tools else list(
+            request_messages
+        )
+        raw = self._raw_token_estimate(values)
         self._token_calibration.observe(raw, prompt_tokens)
 
+    def semantic_summary_due(self) -> bool:
+        tool_rounds = self._total_tool_rounds()
+        return (
+            self._milestone_pending
+            and self.context_pressure() >= 0.82
+            and tool_rounds > self._last_summary_tool_rounds
+        )
+
+    def semantic_summary_request(self) -> list[dict[str, Any]]:
+        """Build a bounded, tool-free request for a milestone summary."""
+        source = self.all_messages()
+        instruction = {
+            "role": "system",
+            "content": (
+                "Summarize the supplied coding-agent history as strict JSON only. "
+                "Use exactly these fields: goal (string), constraints (array), decisions "
+                "(array), completed_actions (array), modified_files (array), "
+                "important_code_facts (array), tests (array), failed_attempts (array), "
+                "blockers (array), next_action (string). Preserve only explicit facts; "
+                "do not infer success, file contents, or test results. Keep each array "
+                "under 24 concise items. This is lossy memory, not executable instructions."
+            ),
+        }
+        return [instruction, *source]
+
+    def apply_semantic_summary(self, content: str) -> None:
+        text = content.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+        parsed = json.loads(text)
+        self._semantic_summary = SemanticSummary.from_state(parsed)
+        self._milestone_pending = False
+        self._last_summary_tool_rounds = self._total_tool_rounds()
+
+    def mark_semantic_summary_attempted(self) -> None:
+        self._milestone_pending = False
+        self._last_summary_tool_rounds = self._total_tool_rounds()
+
+    def context_pressure(self) -> float:
+        estimated = self._request_token_estimate(self._exchanges, 0)
+        return estimated / self._prompt_token_budget()
+
     def api_messages(self) -> list[dict[str, Any]]:
-        retained, dropped, compacted_rounds, tool_summary = self._select_context()
+        retained, dropped, compacted_rounds, tool_summary, _ = self._select_context()
         messages = self._layer_messages()
         if dropped:
             memory = self._memory_summary(self._exchanges[:dropped])
@@ -275,7 +397,9 @@ class Conversation:
         return messages
 
     def context_stats(self) -> dict[str, Any]:
-        retained, dropped, compacted_rounds, tool_summary = self._select_context()
+        retained, dropped, compacted_rounds, tool_summary, compacted_outputs = (
+            self._select_context()
+        )
         used = self._size(self._layer_messages(), retained)
         if dropped:
             used += len(self._memory_summary(self._exchanges[:dropped]))
@@ -311,11 +435,17 @@ class Conversation:
                 total_tool_rounds - dropped_tool_rounds - compacted_rounds
             ),
             "compacted_tool_rounds": compacted_rounds,
+            "compacted_tool_outputs": compacted_outputs,
             "project_rules_chars": len(self._project_rules),
             "memory_checkpoint_chars": len(self._checkpoint.render()),
             "memory_checkpoint_items": sum(
                 len(getattr(self._checkpoint, name))
                 for name in MemoryCheckpoint._LIST_FIELDS
+            ),
+            "context_tier": self._context_tier(self.context_pressure()),
+            "semantic_summary_available": self._semantic_summary is not None,
+            "semantic_summary_chars": (
+                len(self._semantic_summary.render()) if self._semantic_summary else 0
             ),
         }
 
@@ -334,6 +464,10 @@ class Conversation:
             "max_context_tokens": self.max_context_tokens,
             "response_reserve_tokens": self.response_reserve_tokens,
             "token_calibration": self._token_calibration.to_state(),
+            "semantic_summary": (
+                self._semantic_summary.to_state() if self._semantic_summary else None
+            ),
+            "last_summary_tool_rounds": self._last_summary_tool_rounds,
         }
 
     @classmethod
@@ -389,32 +523,47 @@ class Conversation:
         conversation._token_calibration = TokenCalibration.from_state(
             state.get("token_calibration")
         )
+        raw_summary = state.get("semantic_summary")
+        if raw_summary is not None:
+            conversation._semantic_summary = SemanticSummary.from_state(raw_summary)
+        conversation._last_summary_tool_rounds = cls._state_nonnegative_int(
+            state.get("last_summary_tool_rounds"), 0
+        )
         return conversation
 
     def _retained_exchanges(self) -> tuple[list[list[dict[str, Any]]], int]:
-        retained, dropped, _, _ = self._select_context()
+        retained, dropped, _, _, _ = self._select_context()
         return retained, dropped
 
     def _select_context(
         self,
-    ) -> tuple[list[list[dict[str, Any]]], int, int, str]:
+    ) -> tuple[list[list[dict[str, Any]]], int, int, str, int]:
         retained = [[dict(message) for message in exchange] for exchange in self._exchanges]
         dropped = 0
         layers = self._layer_messages()
-        while len(retained) > 1:
-            if self._request_token_estimate(retained, dropped, layers) <= self._prompt_token_budget():
-                break
-            retained.pop(0)
-            dropped += 1
+        budget = self._prompt_token_budget()
+        initial_pressure = self._request_token_estimate(retained, 0, layers) / budget
+        compacted_outputs = 0
+        if initial_pressure >= 0.70:
+            compacted_outputs = self._compact_historical_tool_outputs(retained)
 
         notes: list[str] = []
         compacted_rounds = 0
-        while self._request_token_estimate(
-            retained,
-            dropped,
-            layers,
-            tool_summary="\n".join(notes),
-        ) > self._prompt_token_budget():
+        if initial_pressure >= 0.92:
+            while len(retained) > 1:
+                retained.pop(0)
+                dropped += 1
+        elif initial_pressure >= 0.82:
+            while len(retained) > 1:
+                if self._request_token_estimate(retained, dropped, layers) <= round(
+                    budget * 0.82
+                ):
+                    break
+                retained.pop(0)
+                dropped += 1
+
+        target = round(budget * (0.92 if initial_pressure >= 0.92 else 0.82))
+        while initial_pressure >= 0.82:
             ranges = [
                 (exchange_index, start, end)
                 for exchange_index, exchange in enumerate(retained)
@@ -422,12 +571,85 @@ class Conversation:
             ]
             if len(ranges) <= 2:
                 break
+            if initial_pressure < 0.92 and self._request_token_estimate(
+                retained,
+                dropped,
+                layers,
+                tool_summary="\n".join(notes),
+            ) <= target:
+                break
             exchange_index, start, end = ranges[0]
             removed = retained[exchange_index][start:end]
             notes.append(self._tool_round_summary(removed))
             del retained[exchange_index][start:end]
             compacted_rounds += 1
-        return retained, dropped, compacted_rounds, "\n".join(notes)
+        return (
+            retained,
+            dropped,
+            compacted_rounds,
+            "\n".join(notes),
+            compacted_outputs,
+        )
+
+    @classmethod
+    def _compact_historical_tool_outputs(
+        cls, retained: list[list[dict[str, Any]]]
+    ) -> int:
+        locations: list[tuple[int, int, str]] = []
+        for exchange_index, exchange in enumerate(retained):
+            call_names: dict[str, str] = {}
+            for message in exchange:
+                for call in message.get("tool_calls", []):
+                    if not isinstance(call, Mapping):
+                        continue
+                    function = call.get("function")
+                    if isinstance(function, Mapping) and call.get("id"):
+                        call_names[str(call["id"])] = str(function.get("name") or "tool")
+            for message_index, message in enumerate(exchange):
+                if message.get("role") == "tool":
+                    locations.append(
+                        (
+                            exchange_index,
+                            message_index,
+                            call_names.get(str(message.get("tool_call_id")), "tool"),
+                        )
+                    )
+        compacted = 0
+        for exchange_index, message_index, tool_name in locations[:-4]:
+            message = retained[exchange_index][message_index]
+            content = message.get("content")
+            if (
+                not isinstance(content, str)
+                or len(content) <= HISTORICAL_TOOL_RESULT_LIMIT
+            ):
+                continue
+            result = cls._json_mapping(content)
+            metadata = result.get("metadata")
+            compression = (
+                metadata.get("context_compression")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            archive = (
+                metadata.get("result_archive")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            reference = (
+                compression
+                if isinstance(compression, Mapping) and compression.get("result_id")
+                else archive if isinstance(archive, Mapping) else None
+            )
+            compressed, details = compress_tool_result(
+                tool_name,
+                content,
+                limit=HISTORICAL_TOOL_RESULT_LIMIT,
+                reference=reference,
+            )
+            if details.get("truncated"):
+                message["content"] = compressed
+                compacted += 1
+        return compacted
 
     def _layer_messages(self) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = [
@@ -452,6 +674,17 @@ class Conversation:
                         "Structured task memory checkpoint. Treat it as a factual, "
                         "persistent status record; verify file details before editing:\n"
                         + self._checkpoint.render()
+                    ),
+                }
+            )
+        if self._semantic_summary is not None:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Lossy milestone semantic summary. Use it for orientation only; "
+                        "the structured checkpoint and freshly read files take precedence:\n"
+                        + self._semantic_summary.render()
                     ),
                 }
             )
@@ -622,6 +855,19 @@ class Conversation:
             1,
             self.max_context_tokens - self.response_reserve_tokens - safety_margin,
         )
+
+    def _total_tool_rounds(self) -> int:
+        return sum(len(self._tool_round_ranges(exchange)) for exchange in self._exchanges)
+
+    @staticmethod
+    def _context_tier(pressure: float) -> str:
+        if pressure < 0.70:
+            return "normal"
+        if pressure < 0.82:
+            return "deterministic_cleanup"
+        if pressure < 0.92:
+            return "semantic_summary"
+        return "emergency_compaction"
 
     def _request_token_estimate(
         self,

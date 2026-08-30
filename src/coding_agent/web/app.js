@@ -87,6 +87,9 @@ const eventPresentation = {
   started: ["BOOT", "Agent 开始执行", "正在准备模型、上下文和本地工具。", "started"],
   model_request: ["ROUND", "开始新一轮", "将当前上下文和可用工具发送给模型。", "round"],
   model_response: ["THOUGHT", "模型决策摘要", "模型已完成本轮决策。", "thought"],
+  semantic_summary_request: ["MEMORY", "生成里程碑摘要", "正在将阶段成果整理为结构化长期记忆。", "thought"],
+  semantic_summary_response: ["MEMORY", "里程碑摘要已更新", "结构化记忆已保存，后续轮次会重新注入。", "observation"],
+  semantic_summary_error: ["MEMORY", "里程碑摘要未更新", "摘要失败不会中断当前任务。", "failure"],
   tool_start: ["ACTION", "执行工具动作", "Agent 请求在受限工作区执行操作。", "action"],
   tool_finish: ["OBSERVATION", "观察工具结果", "结果已写回对话上下文。", "observation"],
   model_error: ["MODEL ERROR", "模型请求失败", "模型请求未能完成。", "failure"],
@@ -377,15 +380,24 @@ function renderConversation(session) {
   elements.contextFill.style.width = `${percent}%`;
   const dropped = context.dropped_exchanges || 0;
   const compactedTools = context.compacted_tool_rounds || 0;
+  const compactedOutputs = context.compacted_tool_outputs || 0;
   const estimated = Number(context.estimated_tokens || 0).toLocaleString("zh-CN");
   const budget = Number(context.budget_tokens || 0).toLocaleString("zh-CN");
   const calibration = context.token_calibrated
     ? `已按 ${context.token_calibration_samples} 次真实用量校准`
     : "首次调用前为本地估算";
-  const compression = dropped || compactedTools
-    ? ` · 压缩 ${dropped} 个旧会话轮次 / ${compactedTools} 个工具轮次`
+  const tierLabels = {
+    normal: "正常保留",
+    deterministic_cleanup: "确定性清理",
+    semantic_summary: "语义摘要",
+    emergency_compaction: "紧急压缩",
+  };
+  const tier = tierLabels[context.context_tier] || "正常保留";
+  const compression = dropped || compactedTools || compactedOutputs
+    ? ` · 压缩 ${dropped} 个旧会话轮次 / ${compactedTools} 个工具轮次 / ${compactedOutputs} 个工具输出`
     : "";
-  elements.contextDetail.textContent = `${estimated} / ${budget} tokens · ${calibration}${compression}`;
+  const semantic = context.semantic_summary_available ? " · 已有里程碑摘要" : "";
+  elements.contextDetail.textContent = `${estimated} / ${budget} tokens · ${tier} · ${calibration}${compression}${semantic}`;
   renderMemory(session.memory || {});
   const turnCount = session.turn_count || 0;
   elements.turnCount.textContent = `${turnCount} ${turnCount === 1 ? "TURN" : "TURNS"}`;

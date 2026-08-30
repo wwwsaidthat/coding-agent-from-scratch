@@ -20,10 +20,12 @@ from .tools import (
     MultiEditTool,
     QwenChatClient,
     ReadFileTool,
+    ReadToolResultTool,
     ReplaceInFileTool,
     RunCommandTool,
     SearchCodeTool,
     ToolRegistry,
+    ToolResultArchive,
     UpdatePlanTool,
     WriteFileTool,
     WebSearchTool,
@@ -86,6 +88,7 @@ def build_registry(
     plan_handler: PlanHandler | None = None,
 ) -> ToolRegistry:
     paths = WorkspacePaths(workspace)
+    result_archive = ToolResultArchive(workspace)
     tools = [
         FindFilesTool(paths),
         SearchCodeTool(paths),
@@ -95,6 +98,7 @@ def build_registry(
         ReplaceInFileTool(paths, approval_handler),
         MultiEditTool(paths, approval_handler),
         RunCommandTool(paths, default_timeout=command_timeout),
+        ReadToolResultTool(result_archive),
     ]
     if plan_handler is not None:
         tools.append(UpdatePlanTool(plan_handler))
@@ -107,7 +111,7 @@ def build_registry(
                 AnalyzePdfTool(paths, external, approval_handler),
             ]
         )
-    return ToolRegistry(tools)
+    return ToolRegistry(tools, result_archive=result_archive)
 
 
 def terminal_approval(proposal: Mapping[str, Any]) -> bool:

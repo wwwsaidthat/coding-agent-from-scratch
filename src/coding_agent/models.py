@@ -68,13 +68,16 @@ class DeepSeekChatModel:
         payload: JsonObject = {
             "model": self.settings.model,
             "messages": list(messages),
-            "tools": list(tools),
-            "tool_choice": "auto",
             "thinking": {
                 "type": self.settings.thinking,
                 "reasoning_effort": self.settings.reasoning_effort,
             },
         }
+        # Milestone summaries are ordinary, tool-free model calls. Some compatible
+        # APIs reject an empty tools array, so only declare tool calling when needed.
+        if tools:
+            payload["tools"] = list(tools)
+            payload["tool_choice"] = "auto"
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = Request(
             self.endpoint,
