@@ -313,7 +313,7 @@ python3 -m unittest discover -s tests -v
 工作区预先提供项目骨架、功能要求和验收测试。LoopCoder 先阅读项目、运行初始测试，然后实现对话历史、工具注册与本地执行、tool call 解析、Agent 循环、最大步数和错误处理，最后运行全部测试。参考 Prompt：
 
 ```text
-当前工作区是一个待完善的 MiniAgent 项目。请根据 README 中的要求检查项目，先运行初始测试并制定计划，再自行实现模型—工具—结果循环、read_file、write_file、run_command、对话历史、错误处理和最大步数终止。不使用任何 Agent 框架或 SDK，不要通过修改测试绕过问题。完成后运行全部测试并总结。
+当前工作区是一个待完善的 MiniAgent 项目。请根据 项目中的PDF 中的要求检查项目，先运行初始测试并制定计划，再自行实现模型—工具—结果循环、read_file、write_file、run_command、对话历史、错误处理和最大步数终止。不使用任何 Agent 框架或 SDK，不要通过修改测试绕过问题。完成后运行全部测试并总结。
 ```
 
 ### 第二轮：根据参考图继续设计前端
