@@ -202,7 +202,6 @@ class Conversation:
         max_context_chars: int = 120_000,
         max_context_tokens: int = 64_000,
         response_reserve_tokens: int = 8_000,
-        project_rules: str = "",
     ) -> None:
         if max_context_chars <= 0:
             raise ValueError("max_context_chars must be greater than zero")
@@ -211,7 +210,6 @@ class Conversation:
         if not 0 <= response_reserve_tokens < max_context_tokens:
             raise ValueError("response_reserve_tokens must be below max_context_tokens")
         self._system_prompt = system_prompt
-        self._project_rules = project_rules.strip()[:20_000]
         self._exchanges: list[list[dict[str, Any]]] = []
         self._active = False
         self._checkpoint = MemoryCheckpoint()
@@ -436,7 +434,6 @@ class Conversation:
             ),
             "compacted_tool_rounds": compacted_rounds,
             "compacted_tool_outputs": compacted_outputs,
-            "project_rules_chars": len(self._project_rules),
             "memory_checkpoint_chars": len(self._checkpoint.render()),
             "memory_checkpoint_items": sum(
                 len(getattr(self._checkpoint, name))
@@ -456,7 +453,6 @@ class Conversation:
     def to_state(self) -> dict[str, Any]:
         return {
             "system_prompt": self._system_prompt,
-            "project_rules": self._project_rules,
             "max_context_chars": self.max_context_chars,
             "exchanges": self._exchanges,
             "active": self._active,
@@ -483,9 +479,6 @@ class Conversation:
         if not isinstance(exchanges, list):
             raise ValueError("Conversation state has invalid exchanges")
 
-        project_rules = state.get("project_rules", "")
-        if not isinstance(project_rules, str):
-            raise ValueError("Conversation state has invalid project rules")
         restored_max_tokens = cls._state_positive_int(
             state.get("max_context_tokens"), 64_000
         )
@@ -499,7 +492,6 @@ class Conversation:
             max_context_chars=max_context_chars,
             max_context_tokens=restored_max_tokens,
             response_reserve_tokens=restored_reserve,
-            project_rules=project_rules,
         )
         normalized: list[list[dict[str, Any]]] = []
         for exchange in exchanges:
@@ -655,14 +647,6 @@ class Conversation:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt}
         ]
-        if self._project_rules:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": "Project rules (higher priority than task preferences):\n"
-                    + self._project_rules,
-                }
-            )
         checkpoint = self._checkpoint.to_state()
         if checkpoint["goal"] or any(
             checkpoint[name] for name in MemoryCheckpoint._LIST_FIELDS

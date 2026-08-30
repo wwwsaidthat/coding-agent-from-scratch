@@ -43,7 +43,6 @@ MAX_RUNS = 25
 MAX_SESSIONS_RETURNED = 50
 SESSION_STATE_VERSION = 1
 ACTIVE_STATUSES = {"queued", "running", "waiting_approval"}
-PROJECT_RULE_FILES = ("AGENTS.md", "PROJECT_RULES.md")
 
 
 def _now() -> str:
@@ -73,22 +72,6 @@ def _bounded_value(value: Any, limit: int, label: str) -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return str(value)
-
-
-def _load_project_rules(workspace: Path) -> str:
-    sections: list[str] = []
-    remaining = 20_000
-    for name in PROJECT_RULE_FILES:
-        path = workspace / name
-        if not path.is_file() or remaining <= 0:
-            continue
-        try:
-            content = path.read_text(encoding="utf-8", errors="replace")[:remaining]
-        except OSError:
-            continue
-        sections.append(f"# {name}\n{content}")
-        remaining -= len(content)
-    return "\n\n".join(sections)
 
 
 @dataclass(slots=True)
@@ -179,7 +162,6 @@ class RunStore:
             conversation=Conversation(
                 self._system_prompt(),
                 max_context_tokens=self.settings.context_tokens,
-                project_rules=_load_project_rules(workspace),
             ),
         )
         with self._lock:

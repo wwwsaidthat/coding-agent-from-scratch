@@ -222,7 +222,6 @@ class ConversationTests(unittest.TestCase):
         conversation = Conversation(
             "system",
             max_context_chars=2_000,
-            project_rules="Always run focused tests.",
         )
         conversation.start_user_turn("first question")
         conversation.add_final("first answer")
@@ -233,16 +232,7 @@ class ConversationTests(unittest.TestCase):
 
         self.assertEqual(restored.all_messages(), conversation.all_messages())
         self.assertEqual(restored.context_stats()["total_exchanges"], 2)
-        self.assertEqual(
-            restored.context_stats()["project_rules_chars"],
-            len("Always run focused tests."),
-        )
-        project_layers = [
-            message["content"]
-            for message in restored.api_messages()
-            if message.get("role") == "system" and "Project rules" in message["content"]
-        ]
-        self.assertEqual(len(project_layers), 1)
+        self.assertNotIn("project_rules", restored.to_state())
         self.assertFalse(restored.has_active_turn)
 
     def test_structured_checkpoint_tracks_task_edits_plan_and_tests(self) -> None:
@@ -351,10 +341,10 @@ class ConversationTests(unittest.TestCase):
         self.assertTrue(restored.memory_checkpoint()["do_not_repeat"])
         self.assertGreater(restored.context_stats()["memory_checkpoint_items"], 0)
 
-    def test_old_conversation_state_migrates_with_empty_checkpoint(self) -> None:
+    def test_old_conversation_state_ignores_legacy_project_rules(self) -> None:
         legacy = {
             "system_prompt": "system",
-            "project_rules": "",
+            "project_rules": "This legacy field must no longer be injected.",
             "max_context_chars": 2_000,
             "exchanges": [[{"role": "user", "content": "old request"}, {"role": "assistant", "content": "done"}]],
             "active": False,
@@ -363,6 +353,7 @@ class ConversationTests(unittest.TestCase):
         memory = restored.memory_checkpoint()
         self.assertEqual(memory["goal"], "")
         self.assertTrue(all(not value for key, value in memory.items() if key != "goal"))
+        self.assertNotIn("legacy field", json.dumps(restored.api_messages()))
 
     def test_token_budget_calibrates_from_provider_usage_and_persists(self) -> None:
         conversation = Conversation(
@@ -405,7 +396,6 @@ class ConversationTests(unittest.TestCase):
 
         state = {
             "system_prompt": "system",
-            "project_rules": "",
             "max_context_chars": 2_000,
             "max_context_tokens": 200,
             "response_reserve_tokens": 9_999,

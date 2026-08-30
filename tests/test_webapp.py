@@ -250,7 +250,7 @@ class WebApplicationTests(unittest.TestCase):
         self.assertIn("deepseek-v4-pro", restored_prompt)
         self.assertIn("qwen3.6-flash", restored_prompt)
 
-    def test_session_loads_workspace_project_rules(self) -> None:
+    def test_session_does_not_inject_workspace_instruction_files(self) -> None:
         (self.workspace / "AGENTS.md").write_text(
             "Always validate the smallest relevant scope.", encoding="utf-8"
         )
@@ -258,7 +258,14 @@ class WebApplicationTests(unittest.TestCase):
             "/api/sessions",
             {"workspace": str(self.workspace), "demo": True, "max_steps": 10},
         )
-        self.assertGreater(session["context"]["project_rules_chars"], 0)
+        restored_app = LocalWebApplication(
+            Settings(api_key=None, max_steps=10, command_timeout=5),
+            self.workspace,
+        )
+        conversation = restored_app.runs._sessions[session["id"]].conversation
+        visible = json.dumps(conversation.api_messages(), ensure_ascii=False)
+        self.assertNotIn("Always validate the smallest relevant scope", visible)
+        self.assertNotIn("project_rules_chars", session["context"])
 
     def test_image_upload_is_bound_to_session_and_message(self) -> None:
         session = self.post_json(
