@@ -14,21 +14,27 @@
 ## 2. 模块关系
 
 ```text
-cli.py
-  ├── config.py                 .env、环境变量与运行限制
-  ├── models.py                 DeepSeek Chat Completions 客户端
-  ├── agent.py                  核心循环与终止条件
-  │     ├── conversation.py     历史与上下文预算
-  │     └── prompts.py          Agent 行为约束
-  └── tools/
-        ├── registry.py         工具注册、JSON 解析和调度
-        ├── filesystem.py       版本锁、Diff、审批和原子文件编辑
-        ├── search.py           rg 文件发现与结构化代码搜索
-        ├── external.py         Qwen 联网搜索及图片/PDF 理解（审批后传输）
-        ├── planning.py         复杂任务结构化 Plan 与状态更新
-        └── shell.py            受限本地命令工具
+main.py / __main__.py                程序入口
+  └── cli.py                         参数解析与终端交互
+        └── webapp.py                Web 模式的 HTTP API 与任务管理
 
-webapp.py                            本地 HTTP API、会话/任务管理与持久化
+cli.py ─────┐
+webapp.py ──┴── factory.py           两种入口共用的工具注册表组装工厂
+                  ├── config.py      .env、环境变量与运行限制
+                  └── tools/
+                        ├── registry.py     工具注册、JSON 解析和调度
+                        ├── filesystem.py   版本锁、Diff、审批和原子文件编辑
+                        ├── search.py       rg 文件发现与结构化代码搜索
+                        ├── external.py     Qwen 联网搜索及图片/PDF 理解
+                        ├── planning.py     结构化 Plan 与状态更新
+                        └── shell.py        受限本地命令工具
+
+agent.py                              核心循环与终止条件
+  ├── models.py                       DeepSeek Chat Completions 客户端
+  ├── conversation.py                 历史与上下文预算
+  └── prompts.py                      Agent 行为约束
+
+webapp.py                             本地 HTTP API、会话/任务管理与持久化
   └── web/
         ├── index.html          可视化工作台结构
         ├── styles.css          响应式界面样式

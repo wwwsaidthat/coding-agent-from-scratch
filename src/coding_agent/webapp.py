@@ -20,9 +20,9 @@ from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 from .agent import Agent, AgentCancelledError, AgentError
-from .cli import build_registry
 from .config import Settings
 from .conversation import Conversation
+from .factory import build_registry
 from .models import DeepSeekChatModel, ModelAPIError, ScriptedDemoModel
 from .prompts import system_prompt_for_models
 from .tools.external import (

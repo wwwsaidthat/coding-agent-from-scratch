@@ -10,28 +10,9 @@ from typing import Any, Mapping, Sequence
 from .agent import Agent, AgentError
 from .config import Settings, load_env_file
 from .conversation import Conversation
+from .factory import build_registry
 from .models import DeepSeekChatModel, ModelAPIError, ScriptedDemoModel
 from .prompts import system_prompt_for_models
-from .tools import (
-    AnalyzeImageTool,
-    AnalyzePdfTool,
-    FindFilesTool,
-    ListFilesTool,
-    MultiEditTool,
-    QwenChatClient,
-    ReadFileTool,
-    ReadToolResultTool,
-    ReplaceInFileTool,
-    RunCommandTool,
-    SearchCodeTool,
-    ToolRegistry,
-    ToolResultArchive,
-    UpdatePlanTool,
-    WriteFileTool,
-    WebSearchTool,
-)
-from .tools.filesystem import ApprovalHandler, WorkspacePaths
-from .tools.planning import PlanHandler
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,40 +59,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Web server port (default: 8765)",
     )
     return parser
-
-
-def build_registry(
-    workspace: Path,
-    command_timeout: int,
-    approval_handler: ApprovalHandler | None = None,
-    settings: Settings | None = None,
-    plan_handler: PlanHandler | None = None,
-) -> ToolRegistry:
-    paths = WorkspacePaths(workspace)
-    result_archive = ToolResultArchive(workspace)
-    tools = [
-        FindFilesTool(paths),
-        SearchCodeTool(paths),
-        ListFilesTool(paths),
-        ReadFileTool(paths),
-        WriteFileTool(paths, approval_handler),
-        ReplaceInFileTool(paths, approval_handler),
-        MultiEditTool(paths, approval_handler),
-        RunCommandTool(paths, default_timeout=command_timeout),
-        ReadToolResultTool(result_archive),
-    ]
-    if plan_handler is not None:
-        tools.append(UpdatePlanTool(plan_handler))
-    if settings is not None:
-        external = QwenChatClient(settings)
-        tools.extend(
-            [
-                WebSearchTool(external, approval_handler),
-                AnalyzeImageTool(paths, external, approval_handler),
-                AnalyzePdfTool(paths, external, approval_handler),
-            ]
-        )
-    return ToolRegistry(tools, result_archive=result_archive)
 
 
 def terminal_approval(proposal: Mapping[str, Any]) -> bool:

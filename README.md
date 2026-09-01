@@ -56,6 +56,7 @@
 - `src/coding_agent/context_compression.py`：按工具类型压缩模型可见结果；
 - `src/coding_agent/tools/`：工具定义、参数校验、本地执行与完整结果归档；
 - `src/coding_agent/webapp.py`：本地 HTTP API、任务管理与静态资源服务；
+- `src/coding_agent/factory.py`：CLI 与 Web 共用的工具注册表组装工厂；
 - `src/coding_agent/web/`：可视化前端页面。
 
 更详细的设计说明见 [`docs/architecture.md`](docs/architecture.md)。

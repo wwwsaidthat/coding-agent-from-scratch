@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from coding_agent.tools.base import ToolExecutionError
-from coding_agent.cli import build_registry
 from coding_agent.config import Settings
+from coding_agent.factory import build_registry
 from coding_agent.tools.external import AnalyzeImageTool, AnalyzePdfTool, WebSearchTool
 from coding_agent.tools.filesystem import (
     ListFilesTool,
