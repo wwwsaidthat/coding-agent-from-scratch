@@ -8,7 +8,7 @@ from typing import Any, Callable, Mapping
 
 from .conversation import Conversation
 from .context_compression import HISTORICAL_TOOL_RESULT_LIMIT, compress_tool_result
-from .models import ChatModel, ModelResponse, ToolCall
+from .models import ChatModel, ModelResponse
 from .prompts import SYSTEM_PROMPT
 from .tools.registry import ToolRegistry
 

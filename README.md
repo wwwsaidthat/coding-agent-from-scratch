@@ -50,6 +50,8 @@
 
 核心逻辑位于：
 
+- `src/coding_agent/app.py`：统一程序入口、参数解析与 CLI/Web 模式分发；
+- `src/coding_agent/cli.py`：终端交互与单次 CLI 任务运行；
 - `src/coding_agent/agent.py`：Agent 循环和终止条件；
 - `src/coding_agent/models.py`：DeepSeek API 调用与输出解析；
 - `src/coding_agent/conversation.py`：多轮历史、结构化记忆和分级上下文管理；

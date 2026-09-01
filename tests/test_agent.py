@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from coding_agent.agent import Agent, AgentCancelledError, AgentError, AgentLimitError
-from coding_agent.cli import main
+from coding_agent.app import main
 from coding_agent.conversation import Conversation
 from coding_agent.factory import build_registry
 from coding_agent.models import ModelResponse, ScriptedDemoModel, ToolCall

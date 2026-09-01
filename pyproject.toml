@@ -13,7 +13,7 @@ authors = [{ name = "wwwsaidthat" }]
 dependencies = []
 
 [project.scripts]
-coding-agent = "coding_agent.cli:main"
+coding-agent = "coding_agent.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

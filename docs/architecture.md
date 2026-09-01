@@ -14,8 +14,9 @@
 ## 2. 模块关系
 
 ```text
-main.py / __main__.py                程序入口
-  └── cli.py                         参数解析与终端交互
+main.py / __main__.py                外层启动文件
+  └── app.py                         参数解析与 CLI / Web 模式分发
+        ├── cli.py                   终端交互与单次 CLI 任务运行
         └── webapp.py                Web 模式的 HTTP API 与任务管理
 
 cli.py ─────┐
